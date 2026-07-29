@@ -8,18 +8,16 @@ use std::{
     rc::Rc,
 };
 
-use ariadne::{Cache, FileCache, Source};
-
 use crate::{
     analyze::{
-        ErrorVec,
-        ast::{AST, parse::Parser},
+        ErrorContext, ErrorVec, Files, Span,
+        ast::{AST, FnDef, Item, parse::Parser},
         lex::Lexer,
         semantics,
     },
     ir::IR,
     synthesize::{
-        arch::{Assembler, LinkableCode, MachineCode, arm::ArmAssembler},
+        arch::{Assembler, LinkableCode},
         exe::Executable,
     },
 };
@@ -31,24 +29,22 @@ pub mod synthesize;
 
 #[derive(Default)]
 pub struct Compiler<E: Executable, A: Assembler> {
+    err_ctx: ErrorContext,
     _marker: PhantomData<(E, A)>,
 }
 
 impl<E: Executable, A: Assembler> Compiler<E, A> {
     pub fn compile(
-        self,
+        mut self,
         path: impl Into<PathBuf>,
         out_path: impl AsRef<Path>,
     ) -> Result<(), usize> {
         let path: Rc<PathBuf> = Rc::from(path.into());
-        let source = fs::read_to_string(path.as_ref()).unwrap();
 
-        let code = match self.compile_source(path.clone(), &source) {
-            Ok(code) => code,
-            Err(errors) => {
-                errors.dump();
-                return Err(errors.len());
-            }
+        let Ok(code) = self.try_compile(path) else {
+            let errors = self.err_ctx.take_errors();
+            errors.dump();
+            return Err(errors.len());
         };
 
         E::default()
@@ -58,54 +54,113 @@ impl<E: Executable, A: Assembler> Compiler<E, A> {
         Ok(())
     }
 
-    pub fn compile_source(
-        &self,
-        name: Rc<PathBuf>,
-        source: &str,
-    ) -> Result<LinkableCode<A>, ErrorVec> {
-        let mut ast = load_ast(name.clone(), source)?;
+    fn try_compile(&mut self, filepath: Rc<PathBuf>) -> Result<LinkableCode<A>, ()> {
+        let mut ast = AST::new();
+        self.import_package(Rc::new(files::stdlib()), &mut ast, (filepath.clone(), 0..1))?;
+        let main_package =
+            self.import_package(filepath.clone(), &mut ast, (filepath.clone(), 0..1))?;
 
-        let mut libmap = HashMap::new();
-        for lib in ast.imports() {
-            load_lib_recursive(lib, &mut libmap)?;
+        let main_fn = format!("{}::main", main_package);
+        if !ast
+            .items
+            .iter()
+            .any(|item| matches!(item, Item::Function(FnDef{name,..}) if name == &main_fn))
+        {
+            self.err_ctx
+                .error((filepath.clone(), 0..1))
+                .with_message("package must contain a main function at root level")
+                .report();
+
+            return Err(());
         }
 
-        for lib_ast in libmap.into_values() {
-            ast.items.extend(lib_ast.items);
+        match semantics::analyze(ast, &main_fn) {
+            Ok((ast, analyzer)) => {
+                let ir = IR::generate(ast, &analyzer);
+                let code = A::assemble(ir, &main_fn);
+                Ok(code)
+            }
+            Err(errors) => {
+                for error in errors.0 {
+                    self.err_ctx.report(error);
+                }
+                Err(())
+            }
+        }
+    }
+
+    fn import_package(
+        &mut self,
+        filepath: Rc<PathBuf>,
+        main_ast: &mut AST,
+        import_span: Span,
+    ) -> Result<String, ()> {
+        let Ok(source) = fs::read_to_string(filepath.as_ref()) else {
+            self.err_ctx
+                .error(import_span.clone())
+                .with_message("failed to import package")
+                .with_label(import_span, "package imported here")
+                .report();
+
+            return Err(());
+        };
+
+        let tokens = Lexer::lex(source, filepath.clone(), &mut self.err_ctx)?;
+        let mut ast = Parser::parse(tokens, filepath.clone(), &mut self.err_ctx)?;
+
+        let Some(package) = ast.package.clone() else {
+            self.err_ctx
+                .error((filepath.clone(), 0..1))
+                .with_message("main file needs to contain a package statement")
+                .report();
+            return Err(());
+        };
+
+        ast.mangle(&package);
+        main_ast.items.extend(ast.items);
+
+        for (submodule, decl_span) in ast.modules {
+            let full_mod_path = format!("{}::{}", package, submodule);
+            let mod_filepath = filepath
+                .as_ref()
+                .with_file_name(format!("{}.bl", submodule));
+            self.import_module(Rc::new(mod_filepath), &full_mod_path, main_ast, decl_span)?;
         }
 
-        let (ast, analyzer) = semantics::analyze(ast)?;
-
-        let ir = IR::generate(ast, &analyzer);
-        println!("{}", ir);
-
-        let code = A::assemble(ir);
-
-        Ok(code)
-    }
-}
-
-fn load_ast(name: Rc<PathBuf>, source: &str) -> Result<AST, ErrorVec> {
-    let lexer = Lexer::new(name.clone(), source)?;
-    let parser = Parser::new(name, lexer);
-    let ast = parser.into_ast()?;
-
-    Ok(ast)
-}
-
-fn load_lib_recursive(lib: &str, map: &mut HashMap<String, AST>) -> Result<(), ErrorVec> {
-    if lib == "std"
-        && !map.contains_key(lib)
-        && let Ok(source) = fs::read_to_string(files::stdlib())
-    {
-        // it's ok if file doesn't exist. semantic analysis will flag it.
-        let source_name = Rc::new(files::stdlib());
-        let mut ast = load_ast(source_name, &source)?;
-        ast.mangle(lib);
-        map.insert(String::from("std"), ast);
-    } else {
-        todo!()
+        Ok(package)
     }
 
-    Ok(())
+    fn import_module(
+        &mut self,
+        filepath: Rc<PathBuf>,
+        module: &str,
+        main_ast: &mut AST,
+        decl_span: Span,
+    ) -> Result<(), ()> {
+        let Ok(source) = fs::read_to_string(filepath.as_ref()) else {
+            self.err_ctx
+                .error(decl_span.clone())
+                .with_message(format!("failed to locate module {}", module))
+                .with_label(decl_span, "module defined here")
+                .report();
+
+            return Err(());
+        };
+
+        let tokens = Lexer::lex(source, filepath.clone(), &mut self.err_ctx)?;
+        let mut ast = Parser::parse(tokens, filepath.clone(), &mut self.err_ctx)?;
+
+        ast.mangle(module);
+        main_ast.items.extend(ast.items);
+
+        for (submodule, import_span) in ast.modules {
+            let full_mod_path = format!("{}::{}", module, submodule);
+            let mod_filepath = filepath
+                .as_ref()
+                .with_file_name(format!("{}.bl", submodule));
+            self.import_module(Rc::new(mod_filepath), &full_mod_path, main_ast, import_span)?;
+        }
+
+        Ok(())
+    }
 }

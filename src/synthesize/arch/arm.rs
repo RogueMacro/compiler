@@ -28,8 +28,6 @@ pub mod reg;
 
 // const MAX_EXIT_CODE: u16 = 255; // On UNIX
 
-const MAIN_FN: &str = "main";
-
 type InstrIndex = usize;
 
 #[derive(Default)]
@@ -47,7 +45,7 @@ pub struct ArmAssembler {
 }
 
 impl Assembler for ArmAssembler {
-    fn assemble(ir: IR) -> LinkableCode<Self> {
+    fn assemble(ir: IR, main_fn: &str) -> LinkableCode<Self> {
         let mut assembler = ArmAssembler::default();
 
         let mut str_offset = 0;
@@ -67,8 +65,6 @@ impl Assembler for ArmAssembler {
                 body,
             } = item;
 
-            println!("\nassemble fn {}", name);
-
             let offset = assembler.instructions.len() as u64;
             assembler.code.symbols.push((name.clone(), offset * 4));
             assembler.functions.insert(name, offset as usize);
@@ -76,10 +72,7 @@ impl Assembler for ArmAssembler {
             ProcedureGen::assemble(&mut assembler, stack, stack_size, &size_map, body);
         }
 
-        println!("-- BUILTIN --");
         builtin::assemble(&mut assembler);
-
-        println!("functions: {:?}", assembler.functions);
 
         let entry_offset = (assembler.instructions.len() * 4) as u64;
         assembler
@@ -91,7 +84,12 @@ impl Assembler for ArmAssembler {
         assembler.emit_many([
             Inst::BranchLink {
                 offset: FnOffset::Fixed(
-                    *assembler.functions.get(MAIN_FN).unwrap() as i32 - (entry_offset / 4) as i32,
+                    *assembler
+                        .functions
+                        .get(main_fn)
+                        .unwrap_or_else(|| panic!("main function {} not found", main_fn))
+                        as i32
+                        - (entry_offset / 4) as i32,
                 ),
             },
             Inst::Movz {
@@ -114,8 +112,6 @@ impl Assembler for ArmAssembler {
     }
 
     fn into_machine_code(mut self, str_table_offset: usize, bss_offset: u64) -> MachineCode {
-        println!("final code size: {} instructions", self.instructions.len());
-
         self.code
             .instructions
             .extend(
@@ -124,7 +120,6 @@ impl Assembler for ArmAssembler {
                     .enumerate()
                     .flat_map(|(i, mut inst)| {
                         inst.link(i as i32, &self.functions, str_table_offset, bss_offset);
-                        println!("[0x{:<4x}] {:?}", i * 4, inst);
                         inst.encode().to_le_bytes()
                     }),
             );
@@ -135,16 +130,10 @@ impl Assembler for ArmAssembler {
 
 impl ArmAssembler {
     pub fn emit(&mut self, inst: Inst<Register>) {
-        println!("emit: {:?}", inst);
         self.instructions.push(inst);
     }
 
     pub fn emit_many(&mut self, insts: impl IntoIterator<Item = Inst<Register>>) {
-        let insts: Vec<Inst<Register>> = insts.into_iter().collect();
-        for inst in insts.iter() {
-            println!("emit: {:?}", inst);
-        }
-
         self.instructions.extend(insts);
     }
 }
@@ -172,9 +161,6 @@ impl ProcedureGen {
         let mut proc = ProcedureGen::default();
 
         for bb in body {
-            let lifetimes = bb.lifetimes();
-            crate::ir::lifetime::print_lifetimes(&lifetimes);
-
             let first_op_index = proc.instructions.len();
             for op in bb.ops {
                 match op {
@@ -289,7 +275,6 @@ impl ProcedureGen {
                         });
                     }
                     Op::LoadArg { offset, dest } => {
-                        println!("Load arg: {} => {}", offset, dest);
                         proc.emit(Inst::Load {
                             base: EitherReg::Phys(Register::FP),
                             offset: EitherOffset::Imm(u12::new(2 + offset as u16)),

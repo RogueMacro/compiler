@@ -144,18 +144,23 @@ impl Operator {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Keyword {
-    Function,
-    Return,
-    If,
+    Package,
+    Module,
     Use,
     Extern,
-    As,
+
+    Memory,
+    Function,
+    Struct,
+    Impl,
+
+    If,
     While,
     For,
     In,
-    Memory,
-    Struct,
-    Impl,
+    Return,
+
+    As,
     SizeOf,
 }
 
@@ -175,6 +180,8 @@ impl Keyword {
             "struct" => Keyword::Struct,
             "impl" => Keyword::Impl,
             "sizeof" => Keyword::SizeOf,
+            "package" => Keyword::Package,
+            "mod" => Keyword::Module,
             _ => return None,
         };
 

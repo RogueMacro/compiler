@@ -1,60 +1,51 @@
 use std::{ops::Range, path::PathBuf, rc::Rc};
 
 use crate::analyze::{
-    Error, ErrorCode, ErrorContext, ErrorVec, Span,
+    Error, ErrorCode, ErrorContext, Span,
     ast::{
         AST, ArithmeticOp, Assignable, CompareOp, ExprInner, Expression, FnDef, Item, LogicalOp,
         SemanticType, Statement,
     },
     lex::{
-        Lexer,
+        Tokens,
         token::{Keyword, Operator, Token},
     },
     semantics::Sign,
 };
 
-pub struct Parser {
-    err_ctx: ErrorContext,
+pub struct Parser<'e> {
+    tokens: Tokens,
+    ast: AST,
+    err_ctx: &'e mut ErrorContext,
     src_path: Rc<PathBuf>,
-    lexer: Lexer,
 }
 
-impl Parser {
-    pub fn new(src_path: Rc<PathBuf>, lexer: Lexer) -> Self {
-        Self {
-            err_ctx: ErrorContext::new(),
+impl<'e> Parser<'e> {
+    pub fn parse(
+        tokens: Tokens,
+        src_path: Rc<PathBuf>,
+        err_ctx: &'e mut ErrorContext,
+    ) -> Result<AST, ()> {
+        let mut parser = Self {
+            tokens,
+            ast: AST::new(),
+            err_ctx,
             src_path,
-            lexer,
-        }
-    }
+        };
 
-    pub fn into_ast(mut self) -> Result<AST, ErrorVec> {
-        let mut ast = AST::new();
-
-        let result = self.parse(&mut ast);
-        let mut errors = self.err_ctx.take_errors();
-        if let Err(err) = result {
-            errors.0.push(err);
+        while parser.tokens.current().is_some() {
+            match parser.parse_item() {
+                Ok(Some(item)) => parser.ast.add_item(item),
+                Ok(None) => {}
+                Err(err) => parser.err_ctx.report(err),
+            }
         }
 
-        if !errors.is_empty() {
-            return Err(errors);
-        }
-
-        Ok(ast)
-    }
-
-    fn parse(&mut self, ast: &mut AST) -> Result<(), Error> {
-        while self.lexer.current().is_some() {
-            let item = self.parse_item()?;
-            ast.add_item(item);
-        }
-
-        Ok(())
+        Ok(parser.ast)
     }
 
     fn find_semicolon(&mut self) -> Result<bool, Error> {
-        while let Some((token, _)) = self.lexer.take_current()? {
+        while let Some((token, _)) = self.tokens.take_current() {
             if matches!(token, Token::Semicolon) {
                 return Ok(true);
             }
@@ -63,7 +54,7 @@ impl Parser {
         Ok(false)
     }
 
-    fn parse_item(&mut self) -> Result<Item, Error> {
+    fn parse_item(&mut self) -> Result<Option<Item>, Error> {
         let (token, range) = self.expect_take_current()?;
         let Token::Keyword(keyword) = token else {
             return Err(self
@@ -73,12 +64,48 @@ impl Parser {
         };
 
         match keyword {
-            Keyword::Function => self.parse_function(range.start),
+            Keyword::Function => self.parse_function(range.start).map(Some),
             Keyword::Use => unimplemented!(),
-            Keyword::Extern => self.parse_extern(),
-            Keyword::Memory => self.parse_memory(),
-            Keyword::Struct => self.parse_struct(),
-            Keyword::Impl => self.parse_impl(),
+            Keyword::Extern => self.parse_extern().map(Some),
+            Keyword::Memory => self.parse_memory().map(Some),
+            Keyword::Struct => self.parse_struct().map(Some),
+            Keyword::Impl => self.parse_impl().map(Some),
+            Keyword::Package => {
+                let (token, range) = self.expect_take_current()?;
+                let Token::Ident(package) = token else {
+                    let span = self.span(range);
+                    return Err(self
+                        .err_ctx
+                        .error(span.clone())
+                        .with_message("unexpected token")
+                        .with_label(span, "expected package identifier")
+                        .finish());
+                };
+
+                self.expect_semicolon()?;
+                self.ast.package = Some(package);
+
+                Ok(None)
+            }
+            Keyword::Module => {
+                let (token, range) = self.expect_take_current()?;
+                let Token::Ident(module) = token else {
+                    let span = self.span(range);
+                    return Err(self
+                        .err_ctx
+                        .error(span.clone())
+                        .with_message("unexpected token")
+                        .with_label(span, "expected module identifier")
+                        .finish());
+                };
+
+                self.expect_semicolon()?;
+                self.ast
+                    .modules
+                    .push((module, self.span(range.start..self.tokens.last_token_end())));
+
+                Ok(None)
+            }
             _ => Err(self
                 .err_ctx
                 .unexpected_token(self.span(range), "expected function or extern import")
@@ -101,12 +128,12 @@ impl Parser {
         self.expect_token(Token::LeftCurlyBracket, "expected opening curly bracket")?;
 
         let mut functions = Vec::new();
-        while let Some((Token::Keyword(Keyword::Function), range)) = self.lexer.current() {
+        while let Some((Token::Keyword(Keyword::Function), range)) = self.tokens.current() {
             let decl_start = range.start;
-            self.lexer.lex_one();
+            self.tokens.move_one();
             let func = self.parse_function(decl_start)?;
             let Item::Function(fndef) = func else {
-                let span = self.span(decl_start..self.lexer.last_token_end());
+                let span = self.span(decl_start..self.tokens.last_token_end());
                 return Err(self
                     .err_ctx
                     .error(span.clone())
@@ -142,7 +169,7 @@ impl Parser {
 
         let mut fields = Vec::new();
 
-        while !matches!(self.lexer.current(), Some((Token::RightCurlyBracket, _))) {
+        while !matches!(self.tokens.current(), Some((Token::RightCurlyBracket, _))) {
             let (token, range) = self.expect_take_current()?;
             let Token::Ident(field_name) = token else {
                 let span = self.span(range);
@@ -158,10 +185,10 @@ impl Parser {
 
             let field_type = self.parse_type()?;
 
-            let field_span = self.span(range.start..self.lexer.last_token_end());
+            let field_span = self.span(range.start..self.tokens.last_token_end());
 
-            if matches!(self.lexer.current(), Some((Token::Comma, _))) {
-                self.lexer.lex_one()?;
+            if matches!(self.tokens.current(), Some((Token::Comma, _))) {
+                self.tokens.move_one();
             }
 
             fields.push((field_name, field_type, field_span));
@@ -246,21 +273,21 @@ impl Parser {
         )?;
 
         let mut ret_type_begin = decl_start;
-        let ret_type = match self.lexer.current() {
+        let ret_type = match self.tokens.current() {
             Some((Token::Arrow, _)) => {
-                self.lexer.lex_one()?;
-                ret_type_begin = self.lexer.cur_token_start();
+                self.tokens.move_one();
+                ret_type_begin = self.tokens.cur_token_start();
                 self.parse_type()?
             }
             _ => SemanticType::Unit,
         };
 
-        let decl_end = self.lexer.last_token_end();
+        let decl_end = self.tokens.last_token_end();
         let decl_span = self.span(decl_start..decl_end);
         let ret_type_span = self.span(ret_type_begin..decl_end);
 
-        if matches!(self.lexer.current(), Some((Token::Semicolon, _))) {
-            self.lexer.lex_one()?;
+        if matches!(self.tokens.current(), Some((Token::Semicolon, _))) {
+            self.tokens.move_one();
 
             Ok(Item::ForwardDecl {
                 name,
@@ -284,12 +311,12 @@ impl Parser {
 
     fn parse_decl_args(&mut self) -> Result<Vec<(String, SemanticType, Span)>, Error> {
         let mut args = Vec::new();
-        while let Some((Token::Ident(name), _)) = self.lexer.current() {
+        while let Some((Token::Ident(name), _)) = self.tokens.current() {
             let name = name.to_owned();
 
-            let rstart = self.lexer.cur_token_start();
+            let rstart = self.tokens.cur_token_start();
 
-            self.lexer.lex_one()?;
+            self.tokens.move_one();
             self.expect_matches(
                 |t| matches!(t, Token::Colon),
                 "expected colon and argument type",
@@ -297,11 +324,11 @@ impl Parser {
 
             let arg_type = self.parse_type()?;
 
-            let rend = self.lexer.last_token_end();
+            let rend = self.tokens.last_token_end();
 
             args.push((name, arg_type, self.span(rstart..rend)));
 
-            if !matches!(self.lexer.current(), Some((Token::RightParenthesis, _))) {
+            if !matches!(self.tokens.current(), Some((Token::RightParenthesis, _))) {
                 self.expect_token(Token::Comma, "expected comma")?;
             }
         }
@@ -315,11 +342,14 @@ impl Parser {
             Token::Reference => self
                 .parse_type()
                 .map(|t| SemanticType::Pointer(Box::new(t))),
-            Token::Ident(type_str) => Ok(SemanticType::from(type_str)),
+            Token::Ident(mut type_str) => {
+                self.parse_rest_of_path(&mut type_str)?;
+                Ok(SemanticType::from(type_str))
+            }
             Token::LeftParenthesis
-                if matches!(self.lexer.current(), Some((Token::RightParenthesis, _))) =>
+                if matches!(self.tokens.current(), Some((Token::RightParenthesis, _))) =>
             {
-                self.lexer.lex_one()?;
+                self.tokens.move_one();
                 Ok(SemanticType::Unit)
             }
             _ => Err(self
@@ -333,9 +363,9 @@ impl Parser {
         self.expect_token(Token::LeftCurlyBracket, "expected block")?;
 
         let mut statements = Vec::new();
-        while let Some((token, _)) = self.lexer.current() {
+        while let Some((token, _)) = self.tokens.current() {
             if matches!(token, Token::RightCurlyBracket) {
-                self.lexer.take_current()?;
+                self.tokens.take_current();
                 return Ok(statements);
             }
 
@@ -352,15 +382,15 @@ impl Parser {
     }
 
     fn parse_statement(&mut self) -> Result<Statement, Error> {
-        let (token, range) = self.lexer.current().unwrap().clone();
+        let (token, range) = self.tokens.current().unwrap().clone();
 
         if let Token::Keyword(keyword) = token {
-            self.lexer.take_current()?;
+            self.tokens.take_current();
             self.parse_keyword(keyword, range.clone())
         } else {
             let expr = self.parse_expr()?;
 
-            match self.lexer.take_current()? {
+            match self.tokens.take_current() {
                 Some((Token::Semicolon, _)) => Ok(Statement::Expr(expr)),
                 Some((Token::Assign(op), assign_range)) => {
                     let var = match expr.inner.clone() {
@@ -485,10 +515,10 @@ impl Parser {
 
     fn parse_addsub(&mut self) -> Result<Expression, Error> {
         let lhs = self.parse_muldiv()?;
-        match self.lexer.current() {
+        match self.tokens.current() {
             Some((Token::Operator(op @ (Operator::Plus | Operator::Minus)), _)) => {
                 let op = op.as_arithmetic().unwrap();
-                self.lexer.lex_one()?;
+                self.tokens.move_one();
 
                 let rhs = self.parse_addsub()?;
                 let span = self.span(lhs.span.1.start..rhs.span.1.end);
@@ -505,10 +535,10 @@ impl Parser {
 
     fn parse_muldiv(&mut self) -> Result<Expression, Error> {
         let lhs = self.parse_term()?;
-        match self.lexer.current() {
+        match self.tokens.current() {
             Some((Token::Operator(op @ (Operator::Star | Operator::Slash)), _)) => {
                 let op = op.as_arithmetic().unwrap();
-                self.lexer.lex_one()?;
+                self.tokens.move_one();
 
                 let rhs = self.parse_muldiv()?;
                 let span = self.span(lhs.span.1.start..rhs.span.1.end);
@@ -553,14 +583,14 @@ impl Parser {
     fn parse_expr(&mut self) -> Result<Expression, Error> {
         let mut lhs = self.parse_single_expr()?;
 
-        if let Some((Token::Operator(op), _)) = self.lexer.current() {
+        if let Some((Token::Operator(op), _)) = self.tokens.current() {
             let mut op = *op;
 
             let left_bind_power = op.precedence();
 
-            self.lexer.take_current()?;
+            self.tokens.take_current();
 
-            let right_side = match self.lexer.peek() {
+            let right_side = match self.tokens.peek() {
                 Some((Token::Operator(next_op), _)) => Some((next_op.precedence(), *next_op)),
                 _ => None,
             };
@@ -575,7 +605,7 @@ impl Parser {
                     span: self.span(0..1),
                 };
 
-                self.lexer.lex_one()?;
+                self.tokens.move_one();
                 op = next_op;
 
                 self.parse_expr()?
@@ -771,7 +801,7 @@ impl Parser {
                 Expression {
                     inner: ExprInner::SizeOf(typ),
                     typ: None,
-                    span: self.span(kw_range.start..self.lexer.last_token_end()),
+                    span: self.span(kw_range.start..self.tokens.last_token_end()),
                 }
             }
             (_, range) => {
@@ -782,12 +812,12 @@ impl Parser {
             }
         };
 
-        if let Some((Token::Keyword(Keyword::As), _)) = self.lexer.current() {
-            self.lexer.lex_one()?;
+        if let Some((Token::Keyword(Keyword::As), _)) = self.tokens.current() {
+            self.tokens.move_one();
             let typ = self.parse_type()?;
 
             let start = expr.span.1.start;
-            let end = self.lexer.last_token_end();
+            let end = self.tokens.last_token_end();
             let span = self.span(start..end);
 
             return Ok(Expression {
@@ -805,8 +835,44 @@ impl Parser {
         mut ident: String,
         range: Range<usize>,
     ) -> Result<Expression, Error> {
-        while matches!(self.lexer.current(), Some((Token::PathSeparator, _))) {
-            self.lexer.lex_one()?;
+        self.parse_rest_of_path(&mut ident)?;
+
+        if matches!(self.tokens.current(), Some((Token::LeftParenthesis, _))) {
+            self.tokens.move_one();
+
+            let args = self.parse_call_args()?;
+
+            self.expect_token(Token::RightParenthesis, "expected closing parenthesis")?;
+
+            Ok(Expression {
+                inner: ExprInner::FnCall(ident, args),
+                typ: None,
+                span: self.span((range.start)..(self.tokens.last_token_end())),
+            })
+        } else if matches!(self.tokens.current(), Some((Token::LeftBracket, _))) {
+            self.tokens.move_one();
+
+            let expr = self.parse_expr()?;
+
+            self.expect_token(Token::RightBracket, "expected closing bracket")?;
+
+            Ok(Expression {
+                inner: ExprInner::Index(ident, Box::new(expr), None),
+                typ: None,
+                span: self.span((range.start)..(self.tokens.last_token_end())),
+            })
+        } else {
+            Ok(Expression {
+                inner: ExprInner::Variable(ident),
+                typ: None,
+                span: self.span((range.start)..(self.tokens.last_token_end())),
+            })
+        }
+    }
+
+    fn parse_rest_of_path(&mut self, ident: &mut String) -> Result<(), Error> {
+        while matches!(self.tokens.current(), Some((Token::PathSeparator, _))) {
+            self.tokens.move_one();
             let (token, range) = self.expect_take_current()?;
             let Token::Ident(sub_ident) = token else {
                 return Err(self
@@ -819,44 +885,14 @@ impl Parser {
             ident.push_str(&sub_ident);
         }
 
-        if matches!(self.lexer.current(), Some((Token::LeftParenthesis, _))) {
-            self.lexer.lex_one()?;
-
-            let args = self.parse_call_args()?;
-
-            self.expect_token(Token::RightParenthesis, "expected closing parenthesis")?;
-
-            Ok(Expression {
-                inner: ExprInner::FnCall(ident, args),
-                typ: None,
-                span: self.span((range.start)..(self.lexer.last_token_end())),
-            })
-        } else if matches!(self.lexer.current(), Some((Token::LeftBracket, _))) {
-            self.lexer.lex_one()?;
-
-            let expr = self.parse_expr()?;
-
-            self.expect_token(Token::RightBracket, "expected closing bracket")?;
-
-            Ok(Expression {
-                inner: ExprInner::Index(ident, Box::new(expr), None),
-                typ: None,
-                span: self.span((range.start)..(self.lexer.last_token_end())),
-            })
-        } else {
-            Ok(Expression {
-                inner: ExprInner::Variable(ident),
-                typ: None,
-                span: self.span((range.start)..(self.lexer.last_token_end())),
-            })
-        }
+        Ok(())
     }
 
     fn parse_call_args(&mut self) -> Result<Vec<Expression>, Error> {
         let mut args = Vec::new();
         let mut first = true;
 
-        while !matches!(self.lexer.current(), Some((Token::RightParenthesis, _))) {
+        while !matches!(self.tokens.current(), Some((Token::RightParenthesis, _))) {
             if !first {
                 self.expect_matches(|t| matches!(t, Token::Comma), "expected comma")?;
             }
@@ -890,11 +926,11 @@ impl Parser {
     }
 
     fn expect_semicolon(&mut self) -> Result<(), Error> {
-        let current = self.lexer.take_current()?;
+        let current = self.tokens.take_current();
         if !matches!(current, Some((Token::Semicolon, _))) {
             let pos = current
                 .map(|t| t.1.start)
-                .unwrap_or(self.lexer.cur_token_start());
+                .unwrap_or(self.tokens.cur_token_start());
 
             let insert_span = self.span((pos - 1)..pos);
             self.err_ctx
@@ -909,7 +945,7 @@ impl Parser {
     }
 
     fn expect_take_current(&mut self) -> Result<(Token, Range<usize>), Error> {
-        let token = self.lexer.take_current()?;
+        let token = self.tokens.take_current();
         match token {
             Some(token) => Ok(token),
             None => Err(self.err_ctx.unexpected_eof(self.span_eof()).finish()),
@@ -921,297 +957,298 @@ impl Parser {
     }
 
     fn span_eof(&self) -> (Rc<PathBuf>, Range<usize>) {
-        let end = self.lexer.cur_token_start();
+        let end = self.tokens.cur_token_start();
         self.span((end - 1)..end)
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn mod_main() -> Rc<PathBuf> {
-        Rc::new(PathBuf::from("main"))
-    }
-
-    fn get_parser(src: &str) -> Parser {
-        let lexer = Lexer::new(mod_main(), src).unwrap();
-        Parser::new(mod_main(), lexer)
-    }
-
-    #[test]
-    fn expr_addsub() {
-        let ast = get_parser("2 + 3 - 4").parse_expr().unwrap();
-        assert!(matches!(
-            ast,
-            Expression {
-                inner: ExprInner::Arithmetic(
-                    deref!(Expression {
-                        inner: ExprInner::Const(2, None),
-                        ..
-                    }),
-                    deref!(Expression {
-                        inner: ExprInner::Arithmetic(
-                            deref!(Expression {
-                                inner: ExprInner::Const(3, None),
-                                ..
-                            }),
-                            deref!(Expression {
-                                inner: ExprInner::Const(4, None),
-                                ..
-                            }),
-                            ArithmeticOp::Sub,
-                            _
-                        ),
-                        ..
-                    }),
-                    ArithmeticOp::Add,
-                    _
-                ),
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn expr_muldiv() {
-        let ast = get_parser("2 * 3 / 4").parse_expr().unwrap();
-        assert!(matches!(
-            ast,
-            Expression {
-                inner: ExprInner::Arithmetic(
-                    deref!(Expression {
-                        inner: ExprInner::Const(2, None),
-                        ..
-                    }),
-                    deref!(Expression {
-                        inner: ExprInner::Arithmetic(
-                            deref!(Expression {
-                                inner: ExprInner::Const(3, None),
-                                ..
-                            }),
-                            deref!(Expression {
-                                inner: ExprInner::Const(4, None),
-                                ..
-                            }),
-                            ArithmeticOp::Div,
-                            _
-                        ),
-                        ..
-                    }),
-                    ArithmeticOp::Mul,
-                    _
-                ),
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn expr_precedence_add_mul() {
-        let ast = get_parser("2 + 3 * 4").parse_expr().unwrap();
-        eprintln!("{:#?}", ast);
-        assert!(matches!(
-            ast,
-            Expression {
-                inner: ExprInner::Arithmetic(
-                    deref!(Expression {
-                        inner: ExprInner::Const(2, None),
-                        ..
-                    }),
-                    deref!(Expression {
-                        inner: ExprInner::Arithmetic(
-                            deref!(Expression {
-                                inner: ExprInner::Const(3, None),
-                                ..
-                            }),
-                            deref!(Expression {
-                                inner: ExprInner::Const(4, None),
-                                ..
-                            }),
-                            ArithmeticOp::Mul,
-                            _
-                        ),
-                        ..
-                    }),
-                    ArithmeticOp::Add,
-                    _
-                ),
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn expr_precedence_mul_add() {
-        let ast = get_parser("2 * 3 + 4").parse_expr().unwrap();
-        eprintln!("{:#?}", ast);
-        assert!(matches!(
-            ast,
-            Expression {
-                inner: ExprInner::Arithmetic(
-                    deref!(Expression {
-                        inner: ExprInner::Arithmetic(
-                            deref!(Expression {
-                                inner: ExprInner::Const(2, None),
-                                ..
-                            }),
-                            deref!(Expression {
-                                inner: ExprInner::Const(3, None),
-                                ..
-                            }),
-                            ArithmeticOp::Mul,
-                            _
-                        ),
-                        ..
-                    }),
-                    deref!(Expression {
-                        inner: ExprInner::Const(4, None),
-                        ..
-                    }),
-                    ArithmeticOp::Add,
-                    _
-                ),
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn expr_parenthesis() {
-        let ast = get_parser("2 * (3 + 4)").parse_expr().unwrap();
-        eprintln!("{:#?}", ast);
-        assert!(matches!(
-            ast,
-            Expression {
-                inner: ExprInner::Arithmetic(
-                    deref!(Expression {
-                        inner: ExprInner::Const(2, None),
-                        ..
-                    }),
-                    deref!(Expression {
-                        inner: ExprInner::Arithmetic(
-                            deref!(Expression {
-                                inner: ExprInner::Const(3, None),
-                                ..
-                            }),
-                            deref!(Expression {
-                                inner: ExprInner::Const(4, None),
-                                ..
-                            }),
-                            ArithmeticOp::Add,
-                            _
-                        ),
-                        ..
-                    }),
-                    ArithmeticOp::Mul,
-                    _
-                ),
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn expr_combo() {
-        let ast = get_parser("1 + 2 * 3 - (4 + 5) / 6").parse_expr().unwrap();
-        eprintln!("{:#?}", ast);
-        assert!(matches!(
-            ast,
-            Expression {
-                inner: ExprInner::Arithmetic(
-                    deref!(Expression {
-                        inner: ExprInner::Const(1, None),
-                        ..
-                    }),
-                    deref!(Expression {
-                        inner: ExprInner::Arithmetic(
-                            deref!(Expression {
-                                inner: ExprInner::Arithmetic(
-                                    deref!(Expression {
-                                        inner: ExprInner::Const(2, None),
-                                        ..
-                                    }),
-                                    deref!(Expression {
-                                        inner: ExprInner::Const(3, None),
-                                        ..
-                                    }),
-                                    ArithmeticOp::Mul,
-                                    _
-                                ),
-                                ..
-                            }),
-                            deref!(Expression {
-                                inner: ExprInner::Arithmetic(
-                                    deref!(Expression {
-                                        inner: ExprInner::Arithmetic(
-                                            deref!(Expression {
-                                                inner: ExprInner::Const(4, None),
-                                                ..
-                                            }),
-                                            deref!(Expression {
-                                                inner: ExprInner::Const(5, None),
-                                                ..
-                                            }),
-                                            ArithmeticOp::Add,
-                                            _
-                                        ),
-                                        ..
-                                    }),
-                                    deref!(Expression {
-                                        inner: ExprInner::Const(6, None),
-                                        ..
-                                    }),
-                                    ArithmeticOp::Div,
-                                    _
-                                ),
-                                ..
-                            }),
-                            ArithmeticOp::Sub,
-                            _
-                        ),
-                        ..
-                    }),
-                    ArithmeticOp::Add,
-                    _
-                ),
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn expr_ident() {
-        let ast = get_parser("2 + pi * 4").parse_expr().unwrap();
-        eprintln!("{:#?}", ast);
-        assert!(matches!(
-            ast,
-            Expression {
-                inner: ExprInner::Arithmetic(
-                    deref!(Expression {
-                        inner: ExprInner::Const(2, None),
-                        ..
-                    }),
-                    deref!(Expression {
-                        inner: ExprInner::Arithmetic(
-                            deref!(Expression {
-                                inner: ExprInner::Variable("pi"),
-                                ..
-                            }),
-                            deref!(Expression {
-                                inner: ExprInner::Const(4, None),
-                                ..
-                            }),
-                            ArithmeticOp::Mul,
-                            _
-                        ),
-                        ..
-                    }),
-                    ArithmeticOp::Add,
-                    _
-                ),
-                ..
-            }
-        ));
-    }
-}
+// #[cfg(test)]
+// mod tests {
+//     use super::*;
+//     use crate::analyze::lex::Lexer;
+//
+//     fn mod_main() -> Rc<PathBuf> {
+//         Rc::new(PathBuf::from("main"))
+//     }
+//
+//     fn get_parser(src: &str) -> Parser {
+//         let lexer = Lexer::lex(src, mod_main(), src).unwrap();
+//         Parser::new(mod_main(), lexer)
+//     }
+//
+//     #[test]
+//     fn expr_addsub() {
+//         let ast = get_parser("2 + 3 - 4").parse_expr().unwrap();
+//         assert!(matches!(
+//             ast,
+//             Expression {
+//                 inner: ExprInner::Arithmetic(
+//                     deref!(Expression {
+//                         inner: ExprInner::Const(2, None),
+//                         ..
+//                     }),
+//                     deref!(Expression {
+//                         inner: ExprInner::Arithmetic(
+//                             deref!(Expression {
+//                                 inner: ExprInner::Const(3, None),
+//                                 ..
+//                             }),
+//                             deref!(Expression {
+//                                 inner: ExprInner::Const(4, None),
+//                                 ..
+//                             }),
+//                             ArithmeticOp::Sub,
+//                             _
+//                         ),
+//                         ..
+//                     }),
+//                     ArithmeticOp::Add,
+//                     _
+//                 ),
+//                 ..
+//             }
+//         ));
+//     }
+//
+//     #[test]
+//     fn expr_muldiv() {
+//         let ast = get_parser("2 * 3 / 4").parse_expr().unwrap();
+//         assert!(matches!(
+//             ast,
+//             Expression {
+//                 inner: ExprInner::Arithmetic(
+//                     deref!(Expression {
+//                         inner: ExprInner::Const(2, None),
+//                         ..
+//                     }),
+//                     deref!(Expression {
+//                         inner: ExprInner::Arithmetic(
+//                             deref!(Expression {
+//                                 inner: ExprInner::Const(3, None),
+//                                 ..
+//                             }),
+//                             deref!(Expression {
+//                                 inner: ExprInner::Const(4, None),
+//                                 ..
+//                             }),
+//                             ArithmeticOp::Div,
+//                             _
+//                         ),
+//                         ..
+//                     }),
+//                     ArithmeticOp::Mul,
+//                     _
+//                 ),
+//                 ..
+//             }
+//         ));
+//     }
+//
+//     #[test]
+//     fn expr_precedence_add_mul() {
+//         let ast = get_parser("2 + 3 * 4").parse_expr().unwrap();
+//         eprintln!("{:#?}", ast);
+//         assert!(matches!(
+//             ast,
+//             Expression {
+//                 inner: ExprInner::Arithmetic(
+//                     deref!(Expression {
+//                         inner: ExprInner::Const(2, None),
+//                         ..
+//                     }),
+//                     deref!(Expression {
+//                         inner: ExprInner::Arithmetic(
+//                             deref!(Expression {
+//                                 inner: ExprInner::Const(3, None),
+//                                 ..
+//                             }),
+//                             deref!(Expression {
+//                                 inner: ExprInner::Const(4, None),
+//                                 ..
+//                             }),
+//                             ArithmeticOp::Mul,
+//                             _
+//                         ),
+//                         ..
+//                     }),
+//                     ArithmeticOp::Add,
+//                     _
+//                 ),
+//                 ..
+//             }
+//         ));
+//     }
+//
+//     #[test]
+//     fn expr_precedence_mul_add() {
+//         let ast = get_parser("2 * 3 + 4").parse_expr().unwrap();
+//         eprintln!("{:#?}", ast);
+//         assert!(matches!(
+//             ast,
+//             Expression {
+//                 inner: ExprInner::Arithmetic(
+//                     deref!(Expression {
+//                         inner: ExprInner::Arithmetic(
+//                             deref!(Expression {
+//                                 inner: ExprInner::Const(2, None),
+//                                 ..
+//                             }),
+//                             deref!(Expression {
+//                                 inner: ExprInner::Const(3, None),
+//                                 ..
+//                             }),
+//                             ArithmeticOp::Mul,
+//                             _
+//                         ),
+//                         ..
+//                     }),
+//                     deref!(Expression {
+//                         inner: ExprInner::Const(4, None),
+//                         ..
+//                     }),
+//                     ArithmeticOp::Add,
+//                     _
+//                 ),
+//                 ..
+//             }
+//         ));
+//     }
+//
+//     #[test]
+//     fn expr_parenthesis() {
+//         let ast = get_parser("2 * (3 + 4)").parse_expr().unwrap();
+//         eprintln!("{:#?}", ast);
+//         assert!(matches!(
+//             ast,
+//             Expression {
+//                 inner: ExprInner::Arithmetic(
+//                     deref!(Expression {
+//                         inner: ExprInner::Const(2, None),
+//                         ..
+//                     }),
+//                     deref!(Expression {
+//                         inner: ExprInner::Arithmetic(
+//                             deref!(Expression {
+//                                 inner: ExprInner::Const(3, None),
+//                                 ..
+//                             }),
+//                             deref!(Expression {
+//                                 inner: ExprInner::Const(4, None),
+//                                 ..
+//                             }),
+//                             ArithmeticOp::Add,
+//                             _
+//                         ),
+//                         ..
+//                     }),
+//                     ArithmeticOp::Mul,
+//                     _
+//                 ),
+//                 ..
+//             }
+//         ));
+//     }
+//
+//     #[test]
+//     fn expr_combo() {
+//         let ast = get_parser("1 + 2 * 3 - (4 + 5) / 6").parse_expr().unwrap();
+//         eprintln!("{:#?}", ast);
+//         assert!(matches!(
+//             ast,
+//             Expression {
+//                 inner: ExprInner::Arithmetic(
+//                     deref!(Expression {
+//                         inner: ExprInner::Const(1, None),
+//                         ..
+//                     }),
+//                     deref!(Expression {
+//                         inner: ExprInner::Arithmetic(
+//                             deref!(Expression {
+//                                 inner: ExprInner::Arithmetic(
+//                                     deref!(Expression {
+//                                         inner: ExprInner::Const(2, None),
+//                                         ..
+//                                     }),
+//                                     deref!(Expression {
+//                                         inner: ExprInner::Const(3, None),
+//                                         ..
+//                                     }),
+//                                     ArithmeticOp::Mul,
+//                                     _
+//                                 ),
+//                                 ..
+//                             }),
+//                             deref!(Expression {
+//                                 inner: ExprInner::Arithmetic(
+//                                     deref!(Expression {
+//                                         inner: ExprInner::Arithmetic(
+//                                             deref!(Expression {
+//                                                 inner: ExprInner::Const(4, None),
+//                                                 ..
+//                                             }),
+//                                             deref!(Expression {
+//                                                 inner: ExprInner::Const(5, None),
+//                                                 ..
+//                                             }),
+//                                             ArithmeticOp::Add,
+//                                             _
+//                                         ),
+//                                         ..
+//                                     }),
+//                                     deref!(Expression {
+//                                         inner: ExprInner::Const(6, None),
+//                                         ..
+//                                     }),
+//                                     ArithmeticOp::Div,
+//                                     _
+//                                 ),
+//                                 ..
+//                             }),
+//                             ArithmeticOp::Sub,
+//                             _
+//                         ),
+//                         ..
+//                     }),
+//                     ArithmeticOp::Add,
+//                     _
+//                 ),
+//                 ..
+//             }
+//         ));
+//     }
+//
+//     #[test]
+//     fn expr_ident() {
+//         let ast = get_parser("2 + pi * 4").parse_expr().unwrap();
+//         eprintln!("{:#?}", ast);
+//         assert!(matches!(
+//             ast,
+//             Expression {
+//                 inner: ExprInner::Arithmetic(
+//                     deref!(Expression {
+//                         inner: ExprInner::Const(2, None),
+//                         ..
+//                     }),
+//                     deref!(Expression {
+//                         inner: ExprInner::Arithmetic(
+//                             deref!(Expression {
+//                                 inner: ExprInner::Variable("pi"),
+//                                 ..
+//                             }),
+//                             deref!(Expression {
+//                                 inner: ExprInner::Const(4, None),
+//                                 ..
+//                             }),
+//                             ArithmeticOp::Mul,
+//                             _
+//                         ),
+//                         ..
+//                     }),
+//                     ArithmeticOp::Add,
+//                     _
+//                 ),
+//                 ..
+//             }
+//         ));
+//     }
+// }

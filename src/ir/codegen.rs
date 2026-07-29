@@ -9,7 +9,6 @@ use crate::{
         semantics::{Analyzer, SemanticType, Sign, ValidAST},
     },
     ir::{BasicBlock, Condition, IR, Item, Label, Op, SourceVal, Terminator, ValSize, VirtualReg},
-    synthesize::arch::arm::instr::EitherOffset,
 };
 
 impl IR {
@@ -23,7 +22,6 @@ impl IR {
                 AstItem::Function(FnDef {
                     name, body, args, ..
                 }) => {
-                    println!("-- {} --", name);
                     let initial_args: Vec<_> = args
                         .into_iter()
                         .enumerate()
@@ -54,7 +52,6 @@ impl IR {
                             name, body, args, ..
                         } = fndef;
 
-                        println!("-- impl {}::{} --", struct_name, name);
                         let name = format!("{}::{}", struct_name, name);
 
                         let initial_args: Vec<_> = args

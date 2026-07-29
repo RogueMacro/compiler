@@ -93,7 +93,6 @@ impl Executable for AppleExecutable {
         let str_literal_offset = text_data_offset + code_size;
         let text_segment_end = page_align(text_data_offset as u64 + code_size as u64);
         let bss_offset = text_segment_end;
-        println!("bss_offset: 0x{:x}", bss_offset);
         let code = code.link(str_literal_offset, bss_offset);
 
         let MachineCode {

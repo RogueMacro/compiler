@@ -28,7 +28,7 @@ pub struct MachineCode {
 }
 
 pub trait Assembler: Sized {
-    fn assemble(ir: IR) -> LinkableCode<Self>;
+    fn assemble(ir: IR, main_fn: &str) -> LinkableCode<Self>;
 
     fn code_size(&self) -> usize;
 

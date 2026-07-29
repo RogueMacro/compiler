@@ -148,8 +148,6 @@ impl Stack {
 
         self.map.insert(vreg, index);
 
-        println!("allocated {} at {} for {} bytes", vreg, index, 8);
-
         index + self.tmp_offset
     }
 
@@ -205,8 +203,6 @@ pub fn allocate(
     let mut free_regs_on_fn_call_end = Vec::new();
 
     for (i, (mut inst, marker)) in instructions.into_iter().enumerate() {
-        println!("[alloc] {:?} {:?}", inst, regs_free);
-
         match &mut inst {
             Inst::BeginFnCall {
                 reserved_stack_size,
@@ -216,8 +212,6 @@ pub fn allocate(
                     free_regs_on_fn_call_end.push(*reg);
                     let offset: u16 = stack.alloc(*vreg).into();
                     let offset = u12::new(offset);
-                    // let offset = u12::new(offset / 2);
-                    println!("[inst] str {:?} [sp, 0x{:0x}]", reg, offset);
 
                     final_insts.push((
                         Inst::Store {
@@ -246,10 +240,6 @@ pub fn allocate(
                 dest,
                 size,
             } => {
-                if stack.tmp_offset > u12::new(0) {
-                    println!("offseting by {}", stack.tmp_offset);
-                }
-
                 if matches!(base, EitherReg::Phys(Register::SP)) {
                     let EitherOffset::Imm(offset) = offset else {
                         panic!()
@@ -276,20 +266,11 @@ pub fn allocate(
 
         let mut alloc_use = |vreg| {
             let reg = if let Some(reg) = vreg_map.get(&vreg) {
-                println!("{} is already in register {:?}", vreg, reg);
                 *reg
             } else {
                 let offset = stack.offset_of(&vreg);
                 let size = *size_map.get(&vreg).unwrap();
 
-                println!(
-                    "{}",
-                    format!(
-                        "inserting load of {} at offset {} with size {:?}",
-                        vreg, offset, size
-                    )
-                    .green()
-                );
                 let reg = *regs_free.iter().next().unwrap();
                 regs_free.remove(&reg);
                 vreg_map.insert(vreg, reg);

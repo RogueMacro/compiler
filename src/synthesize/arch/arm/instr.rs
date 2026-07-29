@@ -109,10 +109,9 @@ impl FnOffset {
         *self = match self {
             Self::Fixed(i) => Self::Fixed(*i),
             Self::Dynamic(func) => Self::Fixed(
-                *fn_map
-                    .get(func)
-                    .unwrap_or_else(|| panic!("expected function {} was not found", func))
-                    as i32
+                *fn_map.get(func).unwrap_or_else(|| {
+                    panic!("expected function {} was not found in {:?}", func, fn_map)
+                }) as i32
                     - index,
             ),
         };
@@ -867,7 +866,6 @@ impl Inst<Register> {
             // 1  0  0  1  1  0  1  0  1  0  0  1  1  1  1  1  cond        0  1  1  1  1  1  1  Rd
             Inst::Cset { inv_cond, dest } => {
                 let cond = cond_to_u32(inv_cond);
-                println!("COND: {}", cond);
                 let dest = dest as u32;
 
                 (0b1001101010011111_0000_0111111 << 5) | (cond << 12) | dest
@@ -918,7 +916,6 @@ impl Inst<Register> {
                     }
                     EitherOffset::Imm(imm) => {
                         let imm = Into::<u16>::into(imm) as u32;
-                        println!("LOAD {}", imm);
                         (size << 30) | (0b11100101 << 22) | (imm << 10) | (base << 5) | dest
                     }
                 }

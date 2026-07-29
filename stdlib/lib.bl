@@ -1,24 +1,25 @@
 // file descriptors:
 // stdout = 1
 
+package std;
+
+mod fmt;
+
 memory arena: &i8;
 memory arena_size: u64;
 memory arena_offset: u64;
 memory arena_init: bool;
 
-
-fn print(buf: &char) {
-    std::write(1, buf, std::strlen(buf));
-}
-
 fn println(buf: &char) {
-    std::print(buf);
-    std::print("\n");
+    std::fmt::print(buf);
+    std::fmt::print("\n");
 }
 
 fn printc(c: char) {
     std::write(1, &c, 1);
 }
+
+// fn prints(string: String)
 
 fn strlen(buf: &char) -> i64 {
   ptr := buf;
@@ -93,3 +94,28 @@ fn alloc(bytes: u64) -> &i8 {
   return ptr;
 }
 
+
+struct String {
+  data: &char,
+  length: u64,
+  capacity: u64
+}
+
+impl String {
+  fn from(str: &char) -> &std::String {
+    string := std::alloc(sizeof(std::String)) as &std::String;
+
+    len := std::strlen(str) as u64;
+    data := std::alloc(len) as &char;
+    i := 0u64;
+    while i < len {
+      data[i] = str[i];
+      i += 1;
+    }
+
+    string.data = data;
+    string.length = len;
+    string.capacity = len;
+    return string;
+  }
+}

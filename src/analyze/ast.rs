@@ -12,12 +12,18 @@ pub mod parse;
 
 #[derive(Default, Debug)]
 pub struct AST {
+    pub package: Option<String>,
+    pub modules: Vec<(String, Span)>,
     pub items: Vec<Item>,
 }
 
 impl AST {
     pub fn new() -> Self {
-        Self { items: Vec::new() }
+        Self {
+            package: None,
+            modules: Vec::new(),
+            items: Vec::new(),
+        }
     }
 
     pub fn add_item(&mut self, item: Item) {

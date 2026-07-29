@@ -68,6 +68,7 @@ impl<'c> ErrorBuilder<'c> {
     }
 }
 
+#[derive(Default)]
 pub struct ErrorContext {
     color_gen: ColorGenerator,
     errors: Vec<Error>,
@@ -121,6 +122,10 @@ impl ErrorContext {
         self.errors.is_empty()
     }
 
+    pub fn errors(&self) -> &[Error] {
+        &self.errors
+    }
+
     pub fn take_errors(&mut self) -> ErrorVec {
         ErrorVec(std::mem::take(&mut self.errors))
     }
@@ -139,14 +144,14 @@ impl Display for ErrorCode {
     }
 }
 
-pub struct ErrorVec(Vec<Error>);
+pub struct ErrorVec(pub Vec<Error>);
 
 impl ErrorVec {
     /// Prints all errors to stderr
     pub fn dump(&self) {
         for error in &self.0 {
             error
-                .eprint(Files::default())
+                .eprint(&mut Files::default())
                 .expect("couldn't print error message to stderr");
 
             eprintln!();
@@ -176,11 +181,11 @@ impl fmt::Debug for ErrorVec {
 }
 
 #[derive(Default)]
-struct Files {
+pub struct Files {
     buffer: Option<Source>,
 }
 
-impl Cache<Rc<PathBuf>> for Files {
+impl Cache<Rc<PathBuf>> for &mut Files {
     type Storage = String;
 
     fn fetch(

@@ -11,12 +11,12 @@ use crate::{
     ir::ValSize,
 };
 
+pub mod nameres;
+
 pub struct ValidAST(pub AST);
 
-const MAIN_FN: &str = "main";
-
-pub fn analyze(mut ast: AST) -> Result<(ValidAST, Analyzer), ErrorVec> {
-    let mut analyzer = Analyzer::new();
+pub fn analyze(mut ast: AST, main_fn: impl Into<String>) -> Result<(ValidAST, Analyzer), ErrorVec> {
+    let mut analyzer = Analyzer::new(main_fn);
     analyzer.analyze(&mut ast)?;
 
     Ok((ValidAST(ast), analyzer))
@@ -25,6 +25,7 @@ pub fn analyze(mut ast: AST) -> Result<(ValidAST, Analyzer), ErrorVec> {
 pub struct Analyzer {
     err_ctx: ErrorContext,
 
+    main_fn: String,
     variables: HashMap<String, SemanticType>,
     globals: HashMap<String, SemanticType>,
     functions: HashMap<String, (Span, SemanticType, Vec<(Span, SemanticType)>)>,
@@ -35,9 +36,11 @@ pub struct Analyzer {
 }
 
 impl Analyzer {
-    pub fn new() -> Self {
+    pub fn new(main_fn: impl Into<String>) -> Self {
         Self {
             err_ctx: ErrorContext::new(),
+
+            main_fn: main_fn.into(),
             variables: HashMap::new(),
             globals: HashMap::new(),
             functions: HashMap::new(),
@@ -133,8 +136,8 @@ impl Analyzer {
         }
 
         let mut used_functions: HashSet<String> = HashSet::new();
-        used_functions.insert(String::from("main"));
-        let mut queue: Vec<&str> = vec!["main"];
+        used_functions.insert(self.main_fn.clone());
+        let mut queue: Vec<&str> = vec![&self.main_fn];
 
         while let Some(&func) = queue.first() {
             if let Some(iter) = self.function_calls.get(func) {
@@ -149,9 +152,18 @@ impl Analyzer {
             queue.remove(0);
         }
 
-        ast.items.retain(|item| match item {
+        ast.items.retain_mut(|item| match item {
             Item::Function(FnDef { name, .. }) => used_functions.contains(name),
-            Item::Impl { .. } => true,
+            Item::Impl {
+                struct_name,
+                functions,
+            } => {
+                functions.retain(|fndef| {
+                    used_functions.contains(&format!("{}::{}", struct_name, fndef.name))
+                });
+
+                true
+            }
             Item::Struct { .. } | Item::MemorySegment { .. } => true,
             Item::ForwardDecl { .. } | Item::ExternLib(_) => false,
         });
@@ -178,30 +190,7 @@ impl Analyzer {
         Ok(())
     }
 
-    // fn add_types(&mut self, types: Vec<(String, Vec<(String, SemanticType)>)>) {
-    //     for (typename, fields) in types.iter() {
-    //         let size = self.calc_type_size(&typename, &fields, &types);
-    //         self.types.insert(typename, DataType { fields, size });
-    //     }
-    // }
-
-    // fn calc_type_size(
-    //     &mut self,
-    //     typename: &str,
-    //     fields: &[(String, SemanticType)],
-    //     all_types: &[(String, Vec<(String, SemanticType)>)],
-    // ) -> u64 {
-    //     if let Some(typ) = self.types.get(typename) {
-    //         return typ.size;
-    //     }
-    //
-    //     let mut size = 0;
-    //     for (_, field_type) in fields {
-    //         size += self.size_of(field_type);
-    //     }
-    //
-    //     size
-    // }
+    fn cache_definitions(&mut self, ast_map: &Vec<AST>) {}
 
     fn process_struct_defs(&mut self) {
         for name in self.struct_defs.keys().cloned().collect::<Vec<_>>() {
@@ -294,7 +283,7 @@ impl Analyzer {
 
                 let has_return = self.body(body, ret_type, decl_span);
 
-                if !has_return && (name == MAIN_FN || ret_type != &SemanticType::Unit) {
+                if !has_return && (name == &self.main_fn || ret_type != &SemanticType::Unit) {
                     self.err_ctx
                         .error(decl_span.clone())
                         .with_message("no return statement found in function main")
@@ -330,7 +319,7 @@ impl Analyzer {
 
                     let has_return = self.body(body, ret_type, decl_span);
 
-                    if !has_return && (name == MAIN_FN || ret_type != &SemanticType::Unit) {
+                    if !has_return && (name == self.main_fn || ret_type != &SemanticType::Unit) {
                         self.err_ctx
                             .error(decl_span.clone())
                             .with_message("no return statement found in function")
@@ -432,24 +421,28 @@ impl Analyzer {
                             Some(SemanticType::Pointer(
                                 ref user_type @ deref!(SemanticType::UserType(ref name)),
                             )) => {
-                                self.verify_type(user_type, var_span);
-                                let data_type = self.types.get(name).unwrap();
-                                let field_type = data_type.fields.iter().find_map(|(n, t, _)| {
-                                    if n == member { Some(t.clone()) } else { None }
-                                });
+                                if self.verify_type(user_type, var_span) {
+                                    let data_type = self.types.get(name).unwrap();
+                                    let field_type =
+                                        data_type.fields.iter().find_map(|(n, t, _)| {
+                                            if n == member { Some(t.clone()) } else { None }
+                                        });
 
-                                if field_type.is_none() {
-                                    self.err_ctx
-                                        .error(var_span.clone())
-                                        .with_message("invalid member access")
-                                        .with_label(
-                                            var_span.clone(),
-                                            format!("type {} has no member {}", name, member),
-                                        )
-                                        .report();
+                                    if field_type.is_none() {
+                                        self.err_ctx
+                                            .error(var_span.clone())
+                                            .with_message("invalid member access")
+                                            .with_label(
+                                                var_span.clone(),
+                                                format!("type {} has no member {}", name, member),
+                                            )
+                                            .report();
+                                    }
+
+                                    field_type
+                                } else {
+                                    None
                                 }
-
-                                field_type
                             }
                             Some(typ) => {
                                 self.verify_type(&typ, var_span);
@@ -919,7 +912,7 @@ impl Analyzer {
         None
     }
 
-    fn verify_type(&mut self, typ: &SemanticType, span: &Span) {
+    fn verify_type(&mut self, typ: &SemanticType, span: &Span) -> bool {
         match typ {
             SemanticType::UserType(name) if !self.types.contains_key(name) => {
                 self.err_ctx
@@ -927,11 +920,11 @@ impl Analyzer {
                     .with_message("unknown type")
                     .with_label(span.clone(), format!("unknown type {}", name))
                     .report();
+
+                false
             }
-            SemanticType::Pointer(inner) => {
-                self.verify_type(inner, span);
-            }
-            _ => {}
+            SemanticType::Pointer(inner) => self.verify_type(inner, span),
+            _ => true,
         }
     }
 }

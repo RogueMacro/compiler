@@ -8,44 +8,67 @@ use crate::analyze::{
 
 pub mod token;
 
-pub struct Lexer {
+pub struct Lexer<'e> {
     code: Vec<char>,
     index: usize,
-    last: Option<(Token, Range<usize>)>,
-    current: Option<(Token, Range<usize>)>,
-    next: Option<(Token, Range<usize>)>,
-    err_ctx: ErrorContext,
+    err_ctx: &'e mut ErrorContext,
     src_path: Rc<PathBuf>,
 }
 
-impl Lexer {
-    pub fn new(src_path: Rc<PathBuf>, code: impl AsRef<str>) -> Result<Self, Error> {
+impl<'e> Lexer<'e> {
+    pub fn lex(
+        code: impl AsRef<str>,
+        src_path: Rc<PathBuf>,
+        err_ctx: &'e mut ErrorContext,
+    ) -> Result<Tokens, ()> {
         let code: Vec<char> = code.as_ref().chars().collect();
 
         let mut lexer = Self {
             code,
             index: 0,
-            last: None,
-            current: None,
-            next: None,
-            err_ctx: ErrorContext::new(),
+            err_ctx,
             src_path,
         };
 
-        lexer.lex_two()?;
+        let mut tokens = Vec::new();
+        while let Some(token) = lexer.lex_next().map_err(|_| ())? {
+            tokens.push(token);
+        }
 
-        Ok(lexer)
+        let mut tokens = Tokens {
+            tokens: tokens.into_iter(),
+            last: None,
+            current: None,
+            next: None,
+        };
+
+        tokens.move_one();
+        tokens.move_one();
+
+        Ok(tokens)
     }
+}
 
+pub struct Tokens {
+    tokens: std::vec::IntoIter<(Token, Range<usize>)>,
+    last: Option<(Token, Range<usize>)>,
+    current: Option<(Token, Range<usize>)>,
+    next: Option<(Token, Range<usize>)>,
+}
+
+impl Tokens {
     pub fn cur_token_start(&self) -> usize {
         self.current
             .as_ref()
             .map(|(_, r)| r.start)
-            .unwrap_or(self.index)
+            .expect("no current token")
     }
 
     pub fn last_token_end(&self) -> usize {
-        self.last.as_ref().map(|(_, r)| r.end).unwrap_or(self.index)
+        self.last
+            .as_ref()
+            .map(|(_, r)| r.end)
+            .expect("no last token")
     }
 
     /// Get current token
@@ -53,9 +76,9 @@ impl Lexer {
         self.current.as_ref()
     }
 
-    pub fn take_current(&mut self) -> Result<Option<(Token, Range<usize>)>, Error> {
-        self.lex_one()?;
-        Ok(self.last.clone())
+    pub fn take_current(&mut self) -> Option<(Token, Range<usize>)> {
+        self.move_one();
+        self.last.clone()
     }
 
     /// Lookahead to next token
@@ -64,28 +87,15 @@ impl Lexer {
     }
 
     /// Move on from current token to the next
-    pub fn lex_one(&mut self) -> Result<(), Error> {
+    pub fn move_one(&mut self) {
         self.last = self.current.take();
         self.current = self.next.take();
-        self.next = self.lex_next()?;
-
-        // if let Some(token) = self.next.as_ref() {
-        //     println!("[lex] {:?}", token);
-        // }
-
-        Ok(())
-    }
-
-    /// Move on and skip the next token
-    pub fn lex_two(&mut self) -> Result<(), Error> {
-        self.lex_one()?;
-        self.lex_one()?;
-        Ok(())
+        self.next = self.tokens.next();
     }
 }
 
 /// Internals
-impl Lexer {
+impl<'e> Lexer<'e> {
     fn peek_char(&self) -> Option<char> {
         self.code.get(self.index + 1).copied()
     }
