@@ -172,6 +172,11 @@ pub enum ExprInner<'s, T> {
 
     FnCall(&'s str, Vec<Expression<'s, T>>),
 
+    Construct {
+        typ: T,
+        fields: Vec<(&'s str, Expression<'s, T>)>,
+    },
+
     SizeOf(T),
 }
 

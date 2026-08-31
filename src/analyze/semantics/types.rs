@@ -81,7 +81,7 @@ impl TypeId {
         TypeId(hasher.finish())
     }
 
-    pub fn to_ptr_type(&self) -> TypeId {
+    fn to_ptr_type(self) -> TypeId {
         let mut hasher = FxHasher::default();
         hasher.write_u64(self.0);
         hasher.write_u64(PTR_HASH_VAL);
@@ -147,7 +147,7 @@ impl TypeMap {
     // }
 
     pub fn get(&self, typeid: TypeId) -> &TypeInfo {
-        self.map.get(&typeid).unwrap()
+        self.map.get(&typeid).expect("unknown typeid")
     }
 
     pub fn get_or_insert_with<F: FnOnce() -> TypeInfo>(
@@ -698,6 +698,16 @@ impl<'s, 'e> Resolver<'e> {
                     .map(|expr| self.expression(mangled_path, imports, expr))
                     .collect(),
             ),
+            ExprInner::Construct {
+                typ: (typ, span),
+                fields,
+            } => ExprInner::Construct {
+                typ: self.resolve_type(mangled_path, imports, typ, span),
+                fields: fields
+                    .into_iter()
+                    .map(|(name, expr)| (name, self.expression(mangled_path, imports, expr)))
+                    .collect(),
+            },
             ExprInner::SizeOf((typ, span)) => {
                 ExprInner::SizeOf(self.resolve_type(mangled_path, imports, typ, span))
             }

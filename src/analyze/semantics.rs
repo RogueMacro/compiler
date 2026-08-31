@@ -699,14 +699,14 @@ impl<'s> Analyzer<'s> {
                         });
 
                 match parent_type {
-                    Some((_, TypeKind::Struct { qualifier, fields })) => {
+                    Some((parent_typeid, TypeKind::Struct { qualifier, fields })) => {
                         let fieldtype = fields
                             .iter()
                             .find(|(field_name, _, _)| field_name == member);
 
                         if let Some((_, fieldtype, _)) = fieldtype {
-                            *typeid = Some(*fieldtype);
-                            Some(fieldtype.clone())
+                            *typeid = Some(parent_typeid);
+                            Some(*fieldtype)
                         } else {
                             self.err_ctx
                                 .error(parent.span.clone())
@@ -780,7 +780,7 @@ impl<'s> Analyzer<'s> {
                         self.fn_call_context.insert(function.to_owned());
                     }
 
-                    Some(ret_type.clone())
+                    Some(*ret_type)
                 } else {
                     self.err_ctx
                         .error(expr.span.clone())
@@ -791,6 +791,8 @@ impl<'s> Analyzer<'s> {
                     None
                 }
             }
+
+            ExprInner::Construct { typ, fields } => Some(self.types.ptr_type_to(*typ)),
 
             ExprInner::SizeOf(typ) => Some(TypeId::u64()),
         };

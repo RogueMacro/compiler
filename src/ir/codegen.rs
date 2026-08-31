@@ -639,14 +639,22 @@ impl<'ir, 'a, 's> BlockBuilder<'ir, 'a, 's> {
             }
 
             ExprInner::MemberAccess(parent, member, typeid) => {
+                println!("member access: {:?}", parent);
+
                 let parent = self.flatten_expr(*parent, None);
                 let parent_vreg = self.src_to_vreg(parent);
 
                 let offset = self
                     .analyzer
                     .types
-                    .offset_of_member(typeid.unwrap(), &member)
-                    .unwrap();
+                    .offset_of_member(typeid.unwrap(), member)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "type {} does not have member {}",
+                            self.analyzer.types.display(typeid.unwrap()),
+                            member
+                        )
+                    });
 
                 let dest = dest.unwrap_or_else(|| self.get_vreg(type_size.unwrap()));
 
@@ -677,6 +685,10 @@ impl<'ir, 'a, 's> BlockBuilder<'ir, 'a, 's> {
                 });
 
                 dest.map(SourceVal::VReg).unwrap_or(SourceVal::Immediate(0))
+            }
+
+            ExprInner::Construct { typ, fields } => {
+                todo!()
             }
 
             ExprInner::SizeOf(typ) => {

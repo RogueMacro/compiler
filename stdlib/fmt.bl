@@ -1,4 +1,4 @@
-use std::fmt::Formatter;
+use std::String;
 
 fn print(string: *std::String) {
     std::syscall::write(1, string.data, (string.length) as i64);
@@ -14,11 +14,13 @@ fn printc(c: char) {
 }
 
 struct Formatter {
-    string: std::String,
+    string: String,
 }
 
 impl Formatter {
-    fn new() -> Formatter {
-        
+    fn new() -> *Formatter {
+        formatter := [Formatter] { };
+
+        return formatter;
     }
 }

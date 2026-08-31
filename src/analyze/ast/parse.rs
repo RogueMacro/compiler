@@ -825,6 +825,7 @@ impl<'e, 's> Parser<'e, 's> {
                     span: self.span(kw_range.start..self.tokens.last_token_end()),
                 }
             }
+            (Token::LeftBracket, _) => self.parse_construct()?,
             (_, range) => {
                 return Err(self
                     .err_ctx
@@ -849,6 +850,25 @@ impl<'e, 's> Parser<'e, 's> {
         }
 
         Ok(expr)
+    }
+
+    fn parse_construct(&mut self) -> Result<Expression<'s, (ParsedType<'s>, Span)>, Error> {
+        let begin = self.tokens.last_token_end() - 1;
+
+        let typ = self.parse_type()?;
+
+        self.expect_token(Token::RightBracket, "expected closing bracket")?;
+        self.expect_token(Token::LeftCurlyBracket, "expected opening brace")?;
+
+        let fields = Vec::new();
+
+        self.expect_token(Token::RightCurlyBracket, "expected closeing brace")?;
+
+        Ok(Expression {
+            inner: ExprInner::Construct { typ, fields },
+            typ: None,
+            span: self.span(begin..self.tokens.last_token_end()),
+        })
     }
 
     fn parse_ident_expr(
