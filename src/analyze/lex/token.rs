@@ -1,15 +1,15 @@
-use crate::analyze::{ast::ArithmeticOp, semantics::SemanticType};
+use crate::analyze::{ast::ArithmeticOp, semantics::types::Primitive};
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Token {
+pub enum Token<'s> {
     Keyword(Keyword),
 
-    Number(u64, Option<SemanticType>),
+    Number(u64, Option<Primitive>),
     Character(char),
     String(String),
     Bool(bool),
 
-    Ident(String),
+    Ident(&'s str),
 
     Semicolon,
     Colon,
@@ -31,7 +31,7 @@ pub enum Token {
     Operator(Operator),
 }
 
-impl Token {
+impl<'s> Token<'s> {
     pub fn parse_atom(current: char, lookahead: Option<char>) -> Option<(Self, bool)> {
         let token = match (current, lookahead) {
             (':', Some('=')) => (Self::Declare, true),

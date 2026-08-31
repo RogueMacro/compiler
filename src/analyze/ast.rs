@@ -1,9 +1,9 @@
-use std::fmt::Debug;
+use std::{borrow::Cow, fmt::Debug};
 
 use crate::{
     analyze::{
         Span,
-        semantics::{SemanticType, Sign},
+        semantics::types::{ParsedType, Primitive, Sign, TypeId},
     },
     ir::ValSize,
 };
@@ -11,36 +11,32 @@ use crate::{
 pub mod parse;
 
 #[derive(Default, Debug)]
-pub struct AST {
-    pub package: Option<String>,
-    pub modules: Vec<(String, Span)>,
-    pub items: Vec<Item>,
+pub struct AST<'s, T> {
+    pub package: Option<&'s str>,
+    pub modules: Vec<(&'s str, Span)>,
+    pub imports: Vec<&'s str>,
+    pub mangled_path: Option<String>,
+    pub items: Vec<Item<'s, T>>,
 }
 
-impl AST {
+impl<'s, T> AST<'s, T> {
     pub fn new() -> Self {
         Self {
             package: None,
             modules: Vec::new(),
+            imports: Vec::new(),
+            mangled_path: None,
             items: Vec::new(),
         }
     }
 
-    pub fn add_item(&mut self, item: Item) {
+    pub fn add_item(&mut self, item: Item<'s, T>) {
         self.items.push(item);
     }
 
-    pub fn imports(&self) -> impl Iterator<Item = &str> {
-        self.items.iter().filter_map(|i| {
-            if let Item::ExternLib(lib) = i {
-                Some(lib.as_str())
-            } else {
-                None
-            }
-        })
-    }
+    pub fn mangle(&mut self, lib: impl Into<String>) {
+        let lib = lib.into();
 
-    pub fn mangle(&mut self, lib: &str) {
         for item in self.items.iter_mut() {
             match item {
                 Item::Function(FnDef { name, .. })
@@ -48,83 +44,84 @@ impl AST {
                 | Item::Struct { name, .. }
                 | Item::Impl {
                     struct_name: name, ..
-                } => *name = format!("{}::{}", lib, name),
+                } => *name = Cow::Owned(format!("{}::{}", lib, name)),
                 Item::ExternLib(_) => (),
                 Item::MemorySegment { .. } => (),
             }
         }
+
+        self.mangled_path = Some(lib);
     }
 }
 
 #[derive(Debug)]
-pub enum Item {
-    Function(FnDef),
+pub enum Item<'s, T> {
+    Function(FnDef<'s, T>),
     ForwardDecl {
-        name: String,
-        args: Vec<(String, SemanticType, Span)>,
-        ret_type: SemanticType,
+        name: Cow<'s, str>,
+        args: Vec<(&'s str, T, Span)>,
+        ret_type: T,
         decl_span: Span,
     },
-    ExternLib(String),
+    ExternLib(&'s str),
     MemorySegment {
-        name: String,
-        typ: SemanticType,
+        name: &'s str,
+        typ: T,
     },
     Struct {
-        name: String,
+        name: Cow<'s, str>,
         decl_span: Span,
-        fields: Vec<(String, SemanticType, Span)>,
+        fields: Vec<(&'s str, T, Span)>,
     },
     Impl {
-        struct_name: String,
-        functions: Vec<FnDef>,
+        struct_name: Cow<'s, str>,
+        functions: Vec<FnDef<'s, T>>,
     },
 }
 
 #[derive(Debug)]
-pub struct FnDef {
-    pub name: String,
-    pub args: Vec<(String, SemanticType, Span)>,
-    pub body: Vec<Statement>,
+pub struct FnDef<'s, T> {
+    pub name: Cow<'s, str>,
+    pub args: Vec<(&'s str, T, Span)>,
+    pub body: Vec<Statement<'s, T>>,
     pub decl_span: Span,
-    pub ret_type: SemanticType,
-    pub ret_type_span: Span,
+    pub ret_type: T,
 }
 
 #[derive(Debug)]
-pub enum Statement {
+pub enum Statement<'s, T> {
     Declare {
-        var: String,
-        expr: Expression,
+        var: &'s str,
+        expr: Expression<'s, T>,
         var_span: Span,
     },
     Assign {
-        var: Assignable,
-        expr: Expression,
+        var: Assignable<'s, T>,
+        expr: Expression<'s, T>,
         var_span: Span,
     },
     If {
-        guard: Expression,
-        body: Vec<Statement>,
+        guard: Expression<'s, T>,
+        body: Vec<Statement<'s, T>>,
     },
-    Return(Expression),
-    Expr(Expression),
+    Return(Expression<'s, T>),
+    Expr(Expression<'s, T>),
     WhileLoop {
-        guard: Expression,
-        body: Vec<Statement>,
+        guard: Expression<'s, T>,
+        body: Vec<Statement<'s, T>>,
     },
 }
 
 #[derive(Debug, Clone)]
-pub enum Assignable {
-    Var(String),
-    Ptr(String, Option<ValSize>),
-    Index(String, Box<Expression>, Option<ValSize>),
-    MemberAccess(Box<Expression>, String),
+pub enum Assignable<'s, T> {
+    Var(&'s str),
+    Ptr(&'s str, Option<ValSize>),
+    Index(&'s str, Box<Expression<'s, T>>, Option<ValSize>),
+    MemberAccess(Box<Expression<'s, T>>, &'s str),
 }
 
-impl Assignable {
-    pub fn symbol(&self) -> &str {
+impl<'s, T> Assignable<'s, T> {
+    pub fn symbol(&self) -> &'s str {
         match self {
             Self::Var(var)
             | Self::Ptr(var, _)
@@ -135,37 +132,47 @@ impl Assignable {
 }
 
 #[derive(Clone)]
-pub struct Expression {
-    pub inner: ExprInner,
-    pub typ: Option<SemanticType>,
+pub struct Expression<'s, T> {
+    pub inner: ExprInner<'s, T>,
+    pub typ: Option<T>,
     pub span: Span,
 }
 
 #[derive(Debug, Clone)]
-pub enum ExprInner {
-    Const(u64, Option<SemanticType>),
+pub enum ExprInner<'s, T> {
+    Const(u64, Option<Primitive>),
     Character(char),
     String(String),
     Bool(bool),
 
-    Variable(String),
-    Pointer(String),
-    Deref(String, Option<SemanticType>),
+    Variable(&'s str),
+    Pointer(&'s str),
+    Deref(&'s str, Option<TypeId>),
 
-    Arithmetic(Box<Expression>, Box<Expression>, ArithmeticOp, Option<Sign>),
-    Comparison(Box<Expression>, Box<Expression>, CompareOp, Option<Sign>),
-    Logical(Box<Expression>, Box<Expression>, LogicalOp),
-    Not(Box<Expression>),
-    Negate(Box<Expression>),
+    Arithmetic(
+        Box<Expression<'s, T>>,
+        Box<Expression<'s, T>>,
+        ArithmeticOp,
+        Option<Sign>,
+    ),
+    Comparison(
+        Box<Expression<'s, T>>,
+        Box<Expression<'s, T>>,
+        CompareOp,
+        Option<Sign>,
+    ),
+    Logical(Box<Expression<'s, T>>, Box<Expression<'s, T>>, LogicalOp),
+    Not(Box<Expression<'s, T>>),
+    Negate(Box<Expression<'s, T>>),
 
-    Cast(Box<Expression>, SemanticType),
-    Index(String, Box<Expression>, Option<ValSize>),
+    Cast(Box<Expression<'s, T>>, T),
+    Index(&'s str, Box<Expression<'s, T>>, Option<ValSize>),
 
-    MemberAccess(Box<Expression>, String, Option<String>),
+    MemberAccess(Box<Expression<'s, T>>, &'s str, Option<TypeId>),
 
-    FnCall(String, Vec<Expression>),
+    FnCall(&'s str, Vec<Expression<'s, T>>),
 
-    SizeOf(SemanticType),
+    SizeOf(T),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -193,7 +200,7 @@ pub enum LogicalOp {
     Or,
 }
 
-impl Debug for Expression {
+impl<'s, T: Debug> Debug for Expression<'s, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         Debug::fmt(&self.inner, f)
     }

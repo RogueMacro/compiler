@@ -8,6 +8,8 @@ use std::{
 
 use ariadne::{Cache, ColorGenerator, Label, Report, ReportBuilder, ReportKind, Source};
 
+use crate::SourceCache;
+
 pub mod ast;
 pub mod lex;
 pub mod semantics;
@@ -148,10 +150,10 @@ pub struct ErrorVec(pub Vec<Error>);
 
 impl ErrorVec {
     /// Prints all errors to stderr
-    pub fn dump(&self) {
+    pub fn dump(&self, sources: &mut SourceCache) {
         for error in &self.0 {
             error
-                .eprint(&mut Files::default())
+                .eprint(&mut *sources)
                 .expect("couldn't print error message to stderr");
 
             eprintln!();
@@ -177,27 +179,5 @@ impl From<Error> for ErrorVec {
 impl fmt::Debug for ErrorVec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "failed to compile due to {} errors", self.0.len())
-    }
-}
-
-#[derive(Default)]
-pub struct Files {
-    buffer: Option<Source>,
-}
-
-impl Cache<Rc<PathBuf>> for &mut Files {
-    type Storage = String;
-
-    fn fetch(
-        &mut self,
-        path: &Rc<PathBuf>,
-    ) -> Result<&ariadne::Source<Self::Storage>, impl fmt::Debug> {
-        self.buffer = Some(Source::from(fs::read_to_string(path.as_ref())?));
-        Ok::<_, io::Error>(self.buffer.as_ref().unwrap())
-    }
-
-    fn display<'a>(&self, path: &'a Rc<PathBuf>) -> Option<impl fmt::Display + 'a> {
-        // id.file_stem().and_then(OsStr::to_str)
-        Some(path.display())
     }
 }

@@ -1,11 +1,11 @@
-use ux::{i7, u12};
+use ux::u12;
 
 use crate::{
     ir::ValSize,
     synthesize::arch::{
         Assembler,
         arm::{
-            instr::{self, EitherOffset, EitherReg, ImmShift16, Inst},
+            instr::{EitherOffset, EitherReg, ImmShift16, Inst},
             reg::Reg,
         },
     },
@@ -15,9 +15,7 @@ use super::ArmAssembler;
 
 type BuiltinFn = fn(&mut ArmAssembler);
 
-const PREFIX: &str = "std::";
-
-const PAGE_SIZE: u64 = 16384;
+const PREFIX: &str = "std::syscall::";
 
 pub fn assemble(asm: &mut ArmAssembler) {
     let builtins: &[(&str, BuiltinFn)] = &[("exit", exit), ("write", write), ("mmap", mmap)];

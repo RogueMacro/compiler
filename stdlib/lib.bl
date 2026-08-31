@@ -4,29 +4,19 @@
 package std;
 
 mod fmt;
+mod syscall;
 
-memory arena: &i8;
+memory arena: *i8;
 memory arena_size: u64;
 memory arena_offset: u64;
 memory arena_init: bool;
 
-fn println(buf: &char) {
-    std::fmt::print(buf);
-    std::fmt::print("\n");
-}
-
-fn printc(c: char) {
-    std::write(1, &c, 1);
-}
-
-// fn prints(string: String)
-
-fn strlen(buf: &char) -> i64 {
+fn strlen(buf: *char) -> i64 {
   ptr := buf;
   while *ptr != '\0' {
     i := ptr as i64;
     i = i + 1;
-    ptr = i as &char;
+    ptr = i as *char;
   }
 
   start := buf as i64;
@@ -34,13 +24,7 @@ fn strlen(buf: &char) -> i64 {
   return end - start;
 }
 
-fn write(fd: i64, buf: &char, count: i64) -> i64;
-
-fn exit(status: i64);
-
-fn mmap(addr: &(), len: i64, prot: i64, flags: i64, file_desc: i64, offset: i64) -> &i8;
-
-fn itos(number: i64) -> &char {
+fn itos(number: i64) -> *char {
   _n := number;
   n_chars := 0u64;
 
@@ -57,13 +41,13 @@ fn itos(number: i64) -> &char {
       n /= 10;
   }
 
-  str := std::alloc(n_chars + 1) as &char;
+  str := std::alloc(n_chars + 1) as *char;
   i := n_chars - 1;
   n = _n;
 
   while n > 0 {
       c := n % 10 + 48;
-      str[i] = c as char;
+      str[i] = (c as i8) as char;
 
       n /= 10;
       i -= 1;
@@ -81,32 +65,32 @@ fn itos(number: i64) -> &char {
   return str;
 }
 
-fn alloc(bytes: u64) -> &i8 {
+fn alloc(bytes: u64) -> *i8 {
   if !arena_init || bytes > arena_size - arena_offset {
-    arena = std::mmap(0 as &(), 4096, 3, 4098, -1, 0);
+    arena = std::syscall::mmap(0 as *(), 4096, 3, 4098, -1, 0);
     arena_size = 4096u64;
     arena_offset = 0u64;
     arena_init = true;
   }
 
-  ptr := (arena as u64 + arena_offset) as &i8;
+  ptr := (arena as u64 + arena_offset) as *i8;
   arena_offset += bytes;
   return ptr;
 }
 
 
 struct String {
-  data: &char,
+  data: *char,
   length: u64,
   capacity: u64
 }
 
 impl String {
-  fn from(str: &char) -> &std::String {
-    string := std::alloc(sizeof(std::String)) as &std::String;
+  fn from(str: *char) -> *std::String {
+    string := std::alloc(sizeof(std::String)) as *std::String;
 
     len := std::strlen(str) as u64;
-    data := std::alloc(len) as &char;
+    data := std::alloc(len) as *char;
     i := 0u64;
     while i < len {
       data[i] = str[i];

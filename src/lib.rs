@@ -1,19 +1,23 @@
 #![feature(deref_patterns)]
 
 use std::{
+    cell::{Cell, OnceCell, RefCell, RefMut, UnsafeCell},
     collections::HashMap,
+    fmt::{self, Display},
     fs,
     marker::PhantomData,
     path::{Path, PathBuf},
     rc::Rc,
 };
 
+use ariadne::{Cache, FileCache, Source};
+
 use crate::{
     analyze::{
-        ErrorContext, ErrorVec, Files, Span,
+        ErrorContext, Span,
         ast::{AST, FnDef, Item, parse::Parser},
         lex::Lexer,
-        semantics,
+        semantics::{self, types::ParsedType},
     },
     ir::IR,
     synthesize::{
@@ -30,6 +34,7 @@ pub mod synthesize;
 #[derive(Default)]
 pub struct Compiler<E: Executable, A: Assembler> {
     err_ctx: ErrorContext,
+    sources: FileCache,
     _marker: PhantomData<(E, A)>,
 }
 
@@ -41,9 +46,11 @@ impl<E: Executable, A: Assembler> Compiler<E, A> {
     ) -> Result<(), usize> {
         let path: Rc<PathBuf> = Rc::from(path.into());
 
-        let Ok(code) = self.try_compile(path) else {
+        let mut sources = SourceCache::new();
+
+        let Ok(code) = self.try_compile(path, &sources) else {
             let errors = self.err_ctx.take_errors();
-            errors.dump();
+            errors.dump(&mut sources);
             return Err(errors.len());
         };
 
@@ -54,27 +61,45 @@ impl<E: Executable, A: Assembler> Compiler<E, A> {
         Ok(())
     }
 
-    fn try_compile(&mut self, filepath: Rc<PathBuf>) -> Result<LinkableCode<A>, ()> {
-        let mut ast = AST::new();
-        self.import_package(Rc::new(files::stdlib()), &mut ast, (filepath.clone(), 0..1))?;
-        let main_package =
-            self.import_package(filepath.clone(), &mut ast, (filepath.clone(), 0..1))?;
+    fn try_compile(
+        &mut self,
+        filepath: Rc<PathBuf>,
+        sources: &SourceCache,
+    ) -> Result<LinkableCode<A>, ()> {
+        let mut ast_vec = Vec::new();
+        self.import_package(
+            sources,
+            Rc::new(files::stdlib()),
+            &mut ast_vec,
+            (filepath.clone(), 0..1),
+        )?;
+        let main_package = self.import_package(
+            sources,
+            filepath.clone(),
+            &mut ast_vec,
+            (filepath.clone(), 0..1),
+        )?;
+
+        let (ast, typemap) =
+            semantics::types::Resolver::new(&mut self.err_ctx).resolve_and_combine(ast_vec);
 
         let main_fn = format!("{}::main", main_package);
         if !ast
             .items
             .iter()
-            .any(|item| matches!(item, Item::Function(FnDef{name,..}) if name == &main_fn))
+            .any(|item| matches!(item, Item::Function(FnDef { name, .. }) if name == &main_fn))
         {
             self.err_ctx
                 .error((filepath.clone(), 0..1))
                 .with_message("package must contain a main function at root level")
                 .report();
+        }
 
+        if !self.err_ctx.is_empty() {
             return Err(());
         }
 
-        match semantics::analyze(ast, &main_fn) {
+        match semantics::analyze(ast, typemap, &main_fn) {
             Ok((ast, analyzer)) => {
                 let ir = IR::generate(ast, &analyzer);
                 let code = A::assemble(ir, &main_fn);
@@ -89,13 +114,14 @@ impl<E: Executable, A: Assembler> Compiler<E, A> {
         }
     }
 
-    fn import_package(
+    fn import_package<'s>(
         &mut self,
+        sources: &'s SourceCache,
         filepath: Rc<PathBuf>,
-        main_ast: &mut AST,
+        ast_vec: &mut Vec<AST<'s, (ParsedType<'s>, Span)>>,
         import_span: Span,
     ) -> Result<String, ()> {
-        let Ok(source) = fs::read_to_string(filepath.as_ref()) else {
+        let Ok(source) = sources.get_str(filepath.as_ref()) else {
             self.err_ctx
                 .error(import_span.clone())
                 .with_message("failed to import package")
@@ -106,9 +132,9 @@ impl<E: Executable, A: Assembler> Compiler<E, A> {
         };
 
         let tokens = Lexer::lex(source, filepath.clone(), &mut self.err_ctx)?;
-        let mut ast = Parser::parse(tokens, filepath.clone(), &mut self.err_ctx)?;
+        let mut ast = Parser::parse(tokens, source, filepath.clone(), &mut self.err_ctx)?;
 
-        let Some(package) = ast.package.clone() else {
+        let Some(package) = ast.package else {
             self.err_ctx
                 .error((filepath.clone(), 0..1))
                 .with_message("main file needs to contain a package statement")
@@ -116,28 +142,36 @@ impl<E: Executable, A: Assembler> Compiler<E, A> {
             return Err(());
         };
 
-        ast.mangle(&package);
-        main_ast.items.extend(ast.items);
-
-        for (submodule, decl_span) in ast.modules {
+        for (submodule, decl_span) in ast.modules.iter() {
             let full_mod_path = format!("{}::{}", package, submodule);
             let mod_filepath = filepath
                 .as_ref()
                 .with_file_name(format!("{}.bl", submodule));
-            self.import_module(Rc::new(mod_filepath), &full_mod_path, main_ast, decl_span)?;
+
+            self.import_module(
+                sources,
+                Rc::new(mod_filepath),
+                &full_mod_path,
+                ast_vec,
+                decl_span.clone(),
+            )?;
         }
 
-        Ok(package)
+        ast.mangle(package);
+        ast_vec.push(ast);
+
+        Ok(package.to_owned())
     }
 
-    fn import_module(
+    fn import_module<'s>(
         &mut self,
+        sources: &'s SourceCache,
         filepath: Rc<PathBuf>,
         module: &str,
-        main_ast: &mut AST,
+        ast_vec: &mut Vec<AST<'s, (ParsedType<'s>, Span)>>,
         decl_span: Span,
     ) -> Result<(), ()> {
-        let Ok(source) = fs::read_to_string(filepath.as_ref()) else {
+        let Ok(source) = sources.get_str(filepath.as_ref()) else {
             self.err_ctx
                 .error(decl_span.clone())
                 .with_message(format!("failed to locate module {}", module))
@@ -148,19 +182,68 @@ impl<E: Executable, A: Assembler> Compiler<E, A> {
         };
 
         let tokens = Lexer::lex(source, filepath.clone(), &mut self.err_ctx)?;
-        let mut ast = Parser::parse(tokens, filepath.clone(), &mut self.err_ctx)?;
+        let mut ast: AST<'s, (ParsedType<'s>, Span)> =
+            Parser::parse(tokens, source, filepath.clone(), &mut self.err_ctx)?;
 
-        ast.mangle(module);
-        main_ast.items.extend(ast.items);
-
-        for (submodule, import_span) in ast.modules {
+        for (submodule, import_span) in ast.modules.iter() {
             let full_mod_path = format!("{}::{}", module, submodule);
             let mod_filepath = filepath
                 .as_ref()
                 .with_file_name(format!("{}.bl", submodule));
-            self.import_module(Rc::new(mod_filepath), &full_mod_path, main_ast, import_span)?;
+
+            self.import_module(
+                sources,
+                Rc::new(mod_filepath),
+                &full_mod_path,
+                ast_vec,
+                import_span.clone(),
+            )?;
         }
 
+        ast.mangle(module);
+        ast_vec.push(ast);
+
         Ok(())
+    }
+}
+
+struct SourceCache {
+    files: RefCell<HashMap<PathBuf, Source>>,
+}
+
+impl SourceCache {
+    pub fn new() -> Self {
+        Self {
+            files: RefCell::new(HashMap::new()),
+        }
+    }
+
+    pub fn get_str(&self, path: &Path) -> Result<&str, std::io::Error> {
+        self.get(path).map(|s| s.text())
+    }
+
+    pub fn get(&self, path: &Path) -> Result<&Source, std::io::Error> {
+        let mut files = self.files.borrow_mut();
+
+        if !files.contains_key(path) {
+            let text = fs::read_to_string(path)?;
+            files.insert(path.to_owned(), Source::from(text));
+        }
+
+        // Since the returned value and self is borrowed for lifetime 's
+        // and the source text is never moved, this should be safe...
+        Ok(unsafe { std::mem::transmute::<&Source, &Source>(files.get(path).unwrap()) })
+    }
+}
+
+impl ariadne::Cache<Rc<PathBuf>> for SourceCache {
+    type Storage = String;
+
+    fn fetch(&mut self, path: &Rc<PathBuf>) -> Result<&Source<Self::Storage>, impl fmt::Debug> {
+        self.get(path)
+    }
+
+    fn display<'a>(&self, path: &'a Rc<PathBuf>) -> Option<impl Display + 'a> {
+        path.to_str()
     }
 }

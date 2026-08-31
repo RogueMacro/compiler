@@ -1,0 +1,6 @@
+
+fn write(fd: i64, buf: *char, count: i64) -> i64;
+
+fn exit(status: i64);
+
+fn mmap(addr: *(), len: i64, prot: i64, flags: i64, file_desc: i64, offset: i64) -> *i8;

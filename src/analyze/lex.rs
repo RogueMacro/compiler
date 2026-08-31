@@ -1,62 +1,21 @@
-use std::{ops::Range, path::PathBuf, rc::Rc};
+use std::{ops::Range, path::PathBuf, rc::Rc, str::Chars};
 
 use crate::analyze::{
     Error, ErrorContext,
     lex::token::{Keyword, Operator, Token},
-    semantics::SemanticType,
+    semantics::types::Primitive,
 };
 
 pub mod token;
 
-pub struct Lexer<'e> {
-    code: Vec<char>,
-    index: usize,
-    err_ctx: &'e mut ErrorContext,
-    src_path: Rc<PathBuf>,
+pub struct Tokens<'s> {
+    tokens: std::vec::IntoIter<(Token<'s>, Range<usize>)>,
+    last: Option<(Token<'s>, Range<usize>)>,
+    current: Option<(Token<'s>, Range<usize>)>,
+    next: Option<(Token<'s>, Range<usize>)>,
 }
 
-impl<'e> Lexer<'e> {
-    pub fn lex(
-        code: impl AsRef<str>,
-        src_path: Rc<PathBuf>,
-        err_ctx: &'e mut ErrorContext,
-    ) -> Result<Tokens, ()> {
-        let code: Vec<char> = code.as_ref().chars().collect();
-
-        let mut lexer = Self {
-            code,
-            index: 0,
-            err_ctx,
-            src_path,
-        };
-
-        let mut tokens = Vec::new();
-        while let Some(token) = lexer.lex_next().map_err(|_| ())? {
-            tokens.push(token);
-        }
-
-        let mut tokens = Tokens {
-            tokens: tokens.into_iter(),
-            last: None,
-            current: None,
-            next: None,
-        };
-
-        tokens.move_one();
-        tokens.move_one();
-
-        Ok(tokens)
-    }
-}
-
-pub struct Tokens {
-    tokens: std::vec::IntoIter<(Token, Range<usize>)>,
-    last: Option<(Token, Range<usize>)>,
-    current: Option<(Token, Range<usize>)>,
-    next: Option<(Token, Range<usize>)>,
-}
-
-impl Tokens {
+impl<'s> Tokens<'s> {
     pub fn cur_token_start(&self) -> usize {
         self.current
             .as_ref()
@@ -72,17 +31,17 @@ impl Tokens {
     }
 
     /// Get current token
-    pub fn current(&self) -> Option<&(Token, Range<usize>)> {
+    pub fn current(&self) -> Option<&(Token<'s>, Range<usize>)> {
         self.current.as_ref()
     }
 
-    pub fn take_current(&mut self) -> Option<(Token, Range<usize>)> {
+    pub fn take_current(&mut self) -> Option<(Token<'s>, Range<usize>)> {
         self.move_one();
         self.last.clone()
     }
 
     /// Lookahead to next token
-    pub fn peek(&self) -> Option<&(Token, Range<usize>)> {
+    pub fn peek(&self) -> Option<&(Token<'s>, Range<usize>)> {
         self.next.as_ref()
     }
 
@@ -94,54 +53,91 @@ impl Tokens {
     }
 }
 
+pub struct Lexer<'e, 's> {
+    chars: CharIter<'s>,
+    source: &'s str,
+    err_ctx: &'e mut ErrorContext,
+    src_path: Rc<PathBuf>,
+}
+
+impl<'e, 's> Lexer<'e, 's> {
+    pub fn lex(
+        source: &'s str,
+        src_path: Rc<PathBuf>,
+        err_ctx: &'e mut ErrorContext,
+    ) -> Result<Tokens<'s>, ()> {
+        let mut lexer = Self {
+            chars: CharIter::new(source.chars()),
+            source,
+            err_ctx,
+            src_path,
+        };
+
+        let mut tokens = Vec::new();
+        while let Some(token) = lexer.lex_next().map_err(|_| ())? {
+            tokens.push(token);
+        }
+
+        let mut tokens = Tokens::<'s> {
+            tokens: tokens.into_iter(),
+            last: None,
+            current: None,
+            next: None,
+        };
+
+        tokens.move_one();
+        tokens.move_one();
+
+        Ok(tokens)
+    }
+}
+
 /// Internals
-impl<'e> Lexer<'e> {
-    fn peek_char(&self) -> Option<char> {
-        self.code.get(self.index + 1).copied()
-    }
-
-    fn cur_char(&self) -> Option<char> {
-        self.code.get(self.index).copied()
-    }
-
+impl<'e, 's> Lexer<'e, 's> {
     fn find_next_lexable(&mut self) {
-        while let Some(c) = self.cur_char() {
-            if c == '/' && self.peek_char() == Some('/') {
+        while let Some(c) = self.chars.cur {
+            if c == '/' && self.chars.peek == Some('/') {
                 self.lex_comment();
             } else if c.is_whitespace() {
-                self.index += 1;
+                self.chars.next();
             } else {
                 break;
             }
         }
     }
 
-    fn lex_next(&mut self) -> Result<Option<(Token, Range<usize>)>, Error> {
+    fn lex_next(&mut self) -> Result<Option<(Token<'s>, Range<usize>)>, Error> {
         self.find_next_lexable();
 
-        let Some(c) = self.cur_char() else {
+        let Some(c) = self.chars.cur else {
             return Ok(None);
         };
 
-        let token_atom = Token::parse_atom(c, self.peek_char());
-        let op = Operator::parse(c, self.peek_char());
+        let token_atom = Token::parse_atom(c, self.chars.peek);
+        let op = Operator::parse(c, self.chars.peek);
 
         match (token_atom, op) {
             (Some((token, true)), _) => {
-                self.index += 2;
-                return Ok(Some((token, (self.index - 2)..self.index)));
+                self.chars.next2();
+                return Ok(Some((token, (self.chars.index - 2)..self.chars.index)));
             }
             (_, Some((op, true))) => {
-                self.index += 2;
-                return Ok(Some((Token::Operator(op), (self.index - 2)..self.index)));
+                self.chars.next2();
+                return Ok(Some((
+                    Token::Operator(op),
+                    (self.chars.index - 2)..self.chars.index,
+                )));
             }
             (Some((token, false)), _) => {
-                self.index += 1;
-                return Ok(Some((token, (self.index - 1)..self.index)));
+                self.chars.next();
+                return Ok(Some((token, (self.chars.index - 1)..self.chars.index)));
             }
             (_, Some((op, false))) => {
-                self.index += 1;
-                return Ok(Some((Token::Operator(op), (self.index - 1)..self.index)));
+                self.chars.next();
+                return Ok(Some((
+                    Token::Operator(op),
+                    (self.chars.index - 1)..self.chars.index,
+                )));
             }
             _ => (),
         }
@@ -155,31 +151,31 @@ impl<'e> Lexer<'e> {
         }
 
         if c == '\'' {
-            self.index += 1;
-            let Some(character) = self.cur_char() else {
+            self.chars.next();
+            let Some(character) = self.chars.cur else {
                 return Err(self
                     .err_ctx
-                    .unexpected_eof(self.span((self.index - 1)..self.index))
+                    .unexpected_eof(self.span((self.chars.index - 1)..self.chars.index))
                     .finish());
             };
 
             let character = self.lex_full_char(character)?;
 
-            self.index += 1;
-            if !matches!(self.cur_char(), Some('\'')) {
+            self.chars.next();
+            if !matches!(self.chars.cur, Some('\'')) {
                 return Err(self
                     .err_ctx
                     .unexpected_token(
-                        self.span(self.index..(self.index + 1)),
-                        format!("expected ' (quote), got '{:?}'", self.cur_char()),
+                        self.span(self.chars.index..(self.chars.index + 1)),
+                        format!("expected ' (quote), got '{:?}'", self.chars.cur),
                     )
                     .finish());
             }
 
-            self.index += 1;
+            self.chars.next();
             return Ok(Some((
                 Token::Character(character),
-                (self.index - 3)..self.index,
+                (self.chars.index - 3)..self.chars.index,
             )));
         }
 
@@ -190,43 +186,43 @@ impl<'e> Lexer<'e> {
         Err(self
             .err_ctx
             .unexpected_token(
-                self.span(self.index..(self.index + 1)),
+                self.span(self.chars.index..(self.chars.index + 1)),
                 "unexpected character",
             )
             .finish())
     }
 
-    fn lex_string(&mut self) -> Result<(Token, Range<usize>), Error> {
-        assert!(self.cur_char() == Some('\"'));
+    fn lex_string(&mut self) -> Result<(Token<'s>, Range<usize>), Error> {
+        assert!(self.chars.cur == Some('\"'));
 
-        let start = self.index;
-        self.index += 1;
+        let start = self.chars.index;
+        self.chars.next();
         let mut string = String::new();
-        while let Some(c) = self.cur_char() {
+        while let Some(c) = self.chars.cur {
             if c == '"' {
-                self.index += 1;
-                return Ok((Token::String(string), start..self.index));
+                self.chars.next();
+                return Ok((Token::String(string), start..self.chars.index));
             }
 
             let c = self.lex_full_char(c)?;
             string.push(c);
 
-            self.index += 1;
+            self.chars.next();
         }
 
         Err(self
             .err_ctx
-            .unexpected_eof(self.span(start..self.index))
+            .unexpected_eof(self.span(start..self.chars.index))
             .finish())
     }
 
     fn lex_full_char(&mut self, c: char) -> Result<char, Error> {
         if c == '\\' {
-            self.index += 1;
-            let Some(next) = self.cur_char() else {
+            self.chars.next();
+            let Some(next) = self.chars.cur else {
                 return Err(self
                     .err_ctx
-                    .unexpected_eof(self.span((self.index - 1)..self.index))
+                    .unexpected_eof(self.span((self.chars.index - 1)..self.chars.index))
                     .finish());
             };
 
@@ -237,7 +233,7 @@ impl<'e> Lexer<'e> {
                 'n' => '\n',
                 '0' => '\0',
                 _ => {
-                    let span = self.span((self.index - 1)..self.index);
+                    let span = self.span((self.chars.index - 1)..self.chars.index);
                     return Err(self
                         .err_ctx
                         .error(span.clone())
@@ -251,7 +247,7 @@ impl<'e> Lexer<'e> {
         } else if c.is_ascii() {
             Ok(c)
         } else {
-            let span = self.span((self.index - 1)..self.index);
+            let span = self.span((self.chars.index - 1)..self.chars.index);
             Err(self
                 .err_ctx
                 .error(span.clone())
@@ -261,17 +257,17 @@ impl<'e> Lexer<'e> {
         }
     }
 
-    fn lex_ascii(&mut self) -> (Token, Range<usize>) {
-        let start = self.index;
-        let mut string = String::new();
-        while let Some(c) = self.cur_char()
+    fn lex_ascii(&mut self) -> (Token<'s>, Range<usize>) {
+        let start = self.chars.index;
+        while let Some(c) = self.chars.cur
             && (c.is_ascii_alphanumeric() || c == '_')
         {
-            string.push(c);
-            self.index += 1;
+            self.chars.next();
         }
 
-        let token = if let Some(keyword) = Keyword::parse(&string) {
+        let string = &self.source[start..self.chars.index];
+
+        let token = if let Some(keyword) = Keyword::parse(string) {
             Token::Keyword(keyword)
         } else if let Ok(b) = string.parse::<bool>() {
             Token::Bool(b)
@@ -279,28 +275,30 @@ impl<'e> Lexer<'e> {
             Token::Ident(string)
         };
 
-        (token, start..self.index)
+        (token, start..self.chars.index)
     }
 
-    fn lex_number(&mut self) -> Result<(Token, Range<usize>), Error> {
-        let start = self.index;
+    fn lex_number(&mut self) -> Result<(Token<'s>, Range<usize>), Error> {
+        let start = self.chars.index;
         let mut string = String::new();
-        while let Some(c) = self.cur_char()
+        while let Some(c) = self.chars.cur
             && c.is_ascii_digit()
         {
             string.push(c);
-            self.index += 1;
+            self.chars.next();
         }
 
         let num: u64 = string.parse().unwrap();
         let mut explicit_type = None;
 
-        if matches!(self.cur_char(), Some('i' | 'u')) {
-            let begin = self.index;
-            self.index += 3;
-            let type_specifier = &self.code[begin..self.index];
-            if !matches!(type_specifier, ['u' | 'i', '6', '4']) {
-                let span = self.span(begin..self.index);
+        if let Some(sign_char @ ('i' | 'u')) = self.chars.cur {
+            let begin = self.chars.index;
+            let size_chars = self.chars.next2().ok_or_else(|| {
+                let span = self.span(begin..begin + 1);
+                self.err_ctx.unexpected_eof(span).finish()
+            })?;
+            if !matches!(size_chars, ('6', '4')) {
+                let span = self.span(begin..self.chars.index);
                 return Err(self
                     .err_ctx
                     .error(span.clone())
@@ -309,15 +307,22 @@ impl<'e> Lexer<'e> {
                     .finish());
             }
 
-            explicit_type = Some(SemanticType::from(&String::from_iter(type_specifier)));
+            self.chars.next();
+            let type_specifier = match (sign_char, size_chars) {
+                ('i', ('6', '4')) => Primitive::I64,
+                ('u', ('6', '4')) => Primitive::U64,
+                _ => unreachable!(),
+            };
+
+            explicit_type = Some(type_specifier);
         }
 
-        Ok((Token::Number(num, explicit_type), start..self.index))
+        Ok((Token::Number(num, explicit_type), start..self.chars.index))
     }
 
     fn lex_comment(&mut self) {
-        while let Some(c) = self.peek_char() {
-            self.index += 1;
+        while let Some(c) = self.chars.peek {
+            self.chars.next();
             if c == '\n' {
                 break;
             }
@@ -326,5 +331,53 @@ impl<'e> Lexer<'e> {
 
     fn span(&self, range: Range<usize>) -> (Rc<PathBuf>, Range<usize>) {
         (self.src_path.clone(), range)
+    }
+}
+
+struct CharIter<'s> {
+    cur: Option<char>,
+    peek: Option<char>,
+    iter: Chars<'s>,
+    index: usize,
+}
+
+impl<'s> CharIter<'s> {
+    pub fn new(mut chars: Chars<'s>) -> Self {
+        Self {
+            cur: chars.next(),
+            peek: chars.next(),
+            iter: chars,
+            index: 0,
+        }
+    }
+
+    pub fn next(&mut self) -> Option<char> {
+        self.cur = self.peek;
+        self.peek = self.iter.next();
+        self.index += 1;
+        self.cur
+    }
+
+    pub fn next2(&mut self) -> Option<(char, char)> {
+        let a = self.next();
+        let b = self.next();
+
+        if a.is_some() && b.is_some() {
+            Some((a.unwrap(), b.unwrap()))
+        } else {
+            None
+        }
+    }
+
+    pub fn next3(&mut self) -> Option<(char, char, char)> {
+        let a = self.next();
+        let b = self.next();
+        let c = self.next();
+
+        if a.is_some() && b.is_some() && c.is_some() {
+            Some((a.unwrap(), b.unwrap(), c.unwrap()))
+        } else {
+            None
+        }
     }
 }

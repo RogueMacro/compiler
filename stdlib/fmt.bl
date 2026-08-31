@@ -1,0 +1,24 @@
+use std::fmt::Formatter;
+
+fn print(string: *std::String) {
+    std::syscall::write(1, string.data, (string.length) as i64);
+}
+
+fn println(string: *std::String) {
+    std::fmt::print(string);
+    std::syscall::write(1, "\n", 1);
+}
+
+fn printc(c: char) {
+    std::syscall::write(1, &c, 1);
+}
+
+struct Formatter {
+    string: std::String,
+}
+
+impl Formatter {
+    fn new() -> Formatter {
+        
+    }
+}

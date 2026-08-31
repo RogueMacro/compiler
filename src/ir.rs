@@ -1,23 +1,27 @@
 use itertools::Itertools;
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet},
     fmt,
 };
 
-use crate::analyze::{ast::CompareOp, semantics::SemanticType};
+use crate::analyze::{
+    ast::CompareOp,
+    semantics::types::{ParsedType, TypeId},
+};
 
 pub mod codegen;
 pub mod lifetime;
 pub mod ssa;
 
 #[derive(Default)]
-pub struct IR {
-    pub items: Vec<Item>,
+pub struct IR<'s> {
+    pub items: Vec<Item<'s>>,
     pub strings: HashMap<String, StrId>,
-    pub static_mem: StaticMemory,
+    pub static_mem: StaticMemory<'s>,
 }
 
-impl IR {
+impl<'s> IR<'s> {
     pub fn insert_str_literal(&mut self, string: String) -> StrId {
         let len = self.strings.len();
         *self.strings.entry(string).or_insert(len)
@@ -25,24 +29,24 @@ impl IR {
 }
 
 #[derive(Default)]
-pub struct StaticMemory {
-    allocs: HashMap<String, (u64, SemanticType)>,
+pub struct StaticMemory<'s> {
+    allocs: HashMap<&'s str, (u64, TypeId)>,
     size: u64,
 }
 
-impl StaticMemory {
+impl<'s> StaticMemory<'s> {
     pub fn new() -> Self {
         Default::default()
     }
 
-    pub fn alloc(&mut self, name: String, typ: SemanticType, type_size: u64) -> u64 {
+    pub fn alloc(&mut self, name: &'s str, typ: TypeId, type_size: u64) -> u64 {
         let offset = self.size;
         self.size += type_size;
         self.allocs.insert(name, (offset, typ));
         offset
     }
 
-    pub fn get(&self, name: &str) -> Option<&(u64, SemanticType)> {
+    pub fn get(&self, name: &str) -> Option<&(u64, TypeId)> {
         self.allocs.get(name)
     }
 }
@@ -50,9 +54,9 @@ impl StaticMemory {
 pub type StrId = usize;
 pub type OpIndex = usize;
 
-pub enum Item {
+pub enum Item<'s> {
     Function {
-        name: String,
+        name: Cow<'s, str>,
         args: Vec<VirtualReg>,
         stack: HashMap<VirtualReg, u32>,
         stack_size: u32,
@@ -460,7 +464,7 @@ impl fmt::Display for VirtualReg {
     }
 }
 
-impl fmt::Display for IR {
+impl<'s> fmt::Display for IR<'s> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (string, id) in self.strings.iter() {
             writeln!(f, "#{} => \"{}\"", id, string)?;

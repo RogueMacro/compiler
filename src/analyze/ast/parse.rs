@@ -1,34 +1,37 @@
-use std::{ops::Range, path::PathBuf, rc::Rc};
+use std::{borrow::Cow, ops::Range, path::PathBuf, rc::Rc};
 
 use crate::analyze::{
     Error, ErrorCode, ErrorContext, Span,
     ast::{
         AST, ArithmeticOp, Assignable, CompareOp, ExprInner, Expression, FnDef, Item, LogicalOp,
-        SemanticType, Statement,
+        ParsedType, Statement,
     },
     lex::{
         Tokens,
         token::{Keyword, Operator, Token},
     },
-    semantics::Sign,
+    semantics::types::{Primitive, Sign},
 };
 
-pub struct Parser<'e> {
-    tokens: Tokens,
-    ast: AST,
+pub struct Parser<'e, 's> {
+    tokens: Tokens<'s>,
+    source: &'s str,
+    ast: AST<'s, (ParsedType<'s>, Span)>,
     err_ctx: &'e mut ErrorContext,
     src_path: Rc<PathBuf>,
 }
 
-impl<'e> Parser<'e> {
+impl<'e, 's> Parser<'e, 's> {
     pub fn parse(
-        tokens: Tokens,
+        tokens: Tokens<'s>,
+        source: &'s str,
         src_path: Rc<PathBuf>,
         err_ctx: &'e mut ErrorContext,
-    ) -> Result<AST, ()> {
+    ) -> Result<AST<'s, (ParsedType<'s>, Span)>, ()> {
         let mut parser = Self {
             tokens,
-            ast: AST::new(),
+            source,
+            ast: AST::<'s>::new(),
             err_ctx,
             src_path,
         };
@@ -41,7 +44,9 @@ impl<'e> Parser<'e> {
             }
         }
 
-        Ok(parser.ast)
+        let ast: AST<'s, (ParsedType<'s>, Span)> = parser.ast;
+
+        Ok(ast)
     }
 
     fn find_semicolon(&mut self) -> Result<bool, Error> {
@@ -54,7 +59,7 @@ impl<'e> Parser<'e> {
         Ok(false)
     }
 
-    fn parse_item(&mut self) -> Result<Option<Item>, Error> {
+    fn parse_item(&mut self) -> Result<Option<Item<'s, (ParsedType<'s>, Span)>>, Error> {
         let (token, range) = self.expect_take_current()?;
         let Token::Keyword(keyword) = token else {
             return Err(self
@@ -65,11 +70,24 @@ impl<'e> Parser<'e> {
 
         match keyword {
             Keyword::Function => self.parse_function(range.start).map(Some),
-            Keyword::Use => unimplemented!(),
             Keyword::Extern => self.parse_extern().map(Some),
             Keyword::Memory => self.parse_memory().map(Some),
             Keyword::Struct => self.parse_struct().map(Some),
             Keyword::Impl => self.parse_impl().map(Some),
+            Keyword::Use => {
+                let path_start = self.tokens.cur_token_start();
+                self.expect_matches(
+                    |t| matches!(t, Token::Ident(_)),
+                    "expected path to package item",
+                )?;
+
+                let import = self.parse_rest_of_path(path_start)?;
+                self.expect_semicolon()?;
+
+                self.ast.imports.push(import);
+
+                Ok(None)
+            }
             Keyword::Package => {
                 let (token, range) = self.expect_take_current()?;
                 let Token::Ident(package) = token else {
@@ -113,7 +131,7 @@ impl<'e> Parser<'e> {
         }
     }
 
-    fn parse_impl(&mut self) -> Result<Item, Error> {
+    fn parse_impl(&mut self) -> Result<Item<'s, (ParsedType<'s>, Span)>, Error> {
         let (token, decl_range) = self.expect_take_current()?;
         let decl_span = self.span(decl_range);
         let Token::Ident(struct_name) = token else {
@@ -148,12 +166,12 @@ impl<'e> Parser<'e> {
         self.expect_token(Token::RightCurlyBracket, "expected closing curly bracket")?;
 
         Ok(Item::Impl {
-            struct_name,
+            struct_name: Cow::Borrowed(struct_name),
             functions,
         })
     }
 
-    fn parse_struct(&mut self) -> Result<Item, Error> {
+    fn parse_struct(&mut self) -> Result<Item<'s, (ParsedType<'s>, Span)>, Error> {
         let (token, decl_range) = self.expect_take_current()?;
         let decl_span = self.span(decl_range);
         let Token::Ident(name) = token else {
@@ -197,13 +215,13 @@ impl<'e> Parser<'e> {
         self.expect_token(Token::RightCurlyBracket, "expected closing curly bracket")?;
 
         Ok(Item::Struct {
-            name,
+            name: Cow::Borrowed(name),
             decl_span,
             fields,
         })
     }
 
-    fn parse_memory(&mut self) -> Result<Item, Error> {
+    fn parse_memory(&mut self) -> Result<Item<'s, (ParsedType<'s>, Span)>, Error> {
         let (token, range) = self.expect_take_current()?;
         let Token::Ident(name) = token else {
             let span = self.span(range);
@@ -224,18 +242,7 @@ impl<'e> Parser<'e> {
         Ok(Item::MemorySegment { name, typ })
     }
 
-    fn parse_extern(&mut self) -> Result<Item, Error> {
-        match self.parse_extern_inner() {
-            Ok(item) => Ok(item),
-            Err(err) => {
-                self.err_ctx.report(err);
-
-                Ok(Item::ExternLib(String::new()))
-            }
-        }
-    }
-
-    fn parse_extern_inner(&mut self) -> Result<Item, Error> {
+    fn parse_extern(&mut self) -> Result<Item<'s, (ParsedType<'s>, Span)>, Error> {
         let (token, range) = self.expect_take_current()?;
         let Token::Ident(lib) = token else {
             return Err(self
@@ -249,7 +256,10 @@ impl<'e> Parser<'e> {
         Ok(Item::ExternLib(lib))
     }
 
-    fn parse_function(&mut self, decl_start: usize) -> Result<Item, Error> {
+    fn parse_function(
+        &mut self,
+        decl_start: usize,
+    ) -> Result<Item<'s, (ParsedType<'s>, Span)>, Error> {
         let (token, range) = self.expect_take_current()?;
 
         let name = match token {
@@ -259,7 +269,7 @@ impl<'e> Parser<'e> {
                     .unexpected_token(self.span(range), "expected function name")
                     .report();
 
-                String::from("???")
+                "???"
             }
         };
 
@@ -272,25 +282,28 @@ impl<'e> Parser<'e> {
             "expected argument or closing parenthesis",
         )?;
 
-        let mut ret_type_begin = decl_start;
         let ret_type = match self.tokens.current() {
             Some((Token::Arrow, _)) => {
                 self.tokens.move_one();
-                ret_type_begin = self.tokens.cur_token_start();
                 self.parse_type()?
             }
-            _ => SemanticType::Unit,
+            _ => {
+                let cur_tok = self.tokens.cur_token_start();
+                (
+                    ParsedType::Primitive(Primitive::Unit),
+                    self.span(cur_tok..(cur_tok + 1)),
+                )
+            }
         };
 
         let decl_end = self.tokens.last_token_end();
         let decl_span = self.span(decl_start..decl_end);
-        let ret_type_span = self.span(ret_type_begin..decl_end);
 
         if matches!(self.tokens.current(), Some((Token::Semicolon, _))) {
             self.tokens.move_one();
 
             Ok(Item::ForwardDecl {
-                name,
+                name: Cow::Borrowed(name),
                 args,
                 ret_type,
                 decl_span,
@@ -299,17 +312,16 @@ impl<'e> Parser<'e> {
             let body = self.parse_block()?;
 
             Ok(Item::Function(FnDef {
-                name,
+                name: Cow::Borrowed(name),
                 args,
                 body,
                 decl_span,
                 ret_type,
-                ret_type_span,
             }))
         }
     }
 
-    fn parse_decl_args(&mut self) -> Result<Vec<(String, SemanticType, Span)>, Error> {
+    fn parse_decl_args(&mut self) -> Result<Vec<(&'s str, (ParsedType<'s>, Span), Span)>, Error> {
         let mut args = Vec::new();
         while let Some((Token::Ident(name), _)) = self.tokens.current() {
             let name = name.to_owned();
@@ -336,30 +348,33 @@ impl<'e> Parser<'e> {
         Ok(args)
     }
 
-    fn parse_type(&mut self) -> Result<SemanticType, Error> {
+    fn parse_type(&mut self) -> Result<(ParsedType<'s>, Span), Error> {
         let (type_token, range) = self.expect_take_current()?;
-        match type_token {
-            Token::Reference => self
-                .parse_type()
-                .map(|t| SemanticType::Pointer(Box::new(t))),
-            Token::Ident(mut type_str) => {
-                self.parse_rest_of_path(&mut type_str)?;
-                Ok(SemanticType::from(type_str))
+        let parsed_type = match type_token {
+            Token::Operator(Operator::Star) => ParsedType::Pointer(Box::new(self.parse_type()?.0)),
+            Token::Ident(_) => {
+                let type_str = self.parse_rest_of_path(range.start)?;
+                ParsedType::from(type_str)
             }
             Token::LeftParenthesis
                 if matches!(self.tokens.current(), Some((Token::RightParenthesis, _))) =>
             {
                 self.tokens.move_one();
-                Ok(SemanticType::Unit)
+                ParsedType::Primitive(Primitive::Unit)
             }
-            _ => Err(self
-                .err_ctx
-                .unexpected_token(self.span(range), "expected argument type")
-                .finish()),
-        }
+            _ => {
+                return Err(self
+                    .err_ctx
+                    .unexpected_token(self.span(range), "expected type")
+                    .finish());
+            }
+        };
+
+        let span = self.span(range.start..self.tokens.last_token_end());
+        Ok((parsed_type, span))
     }
 
-    fn parse_block(&mut self) -> Result<Vec<Statement>, Error> {
+    fn parse_block(&mut self) -> Result<Vec<Statement<'s, (ParsedType<'s>, Span)>>, Error> {
         self.expect_token(Token::LeftCurlyBracket, "expected block")?;
 
         let mut statements = Vec::new();
@@ -381,7 +396,7 @@ impl<'e> Parser<'e> {
         Err(self.err_ctx.unexpected_eof(self.span_eof()).finish())
     }
 
-    fn parse_statement(&mut self) -> Result<Statement, Error> {
+    fn parse_statement(&mut self) -> Result<Statement<'s, (ParsedType<'s>, Span)>, Error> {
         let (token, range) = self.tokens.current().unwrap().clone();
 
         if let Token::Keyword(keyword) = token {
@@ -399,7 +414,7 @@ impl<'e> Parser<'e> {
                         ExprInner::Index(array, index, size) => {
                             Assignable::Index(array, index, size)
                         }
-                        ExprInner::MemberAccess(parent, member, typename) => {
+                        ExprInner::MemberAccess(parent, member, _typename) => {
                             Assignable::MemberAccess(parent, member)
                         }
                         _ => {
@@ -475,7 +490,11 @@ impl<'e> Parser<'e> {
         }
     }
 
-    fn parse_keyword(&mut self, keyword: Keyword, range: Range<usize>) -> Result<Statement, Error> {
+    fn parse_keyword(
+        &mut self,
+        keyword: Keyword,
+        range: Range<usize>,
+    ) -> Result<Statement<'s, (ParsedType<'s>, Span)>, Error> {
         match keyword {
             Keyword::Return => self.parse_return(),
             Keyword::If => self.parse_if(),
@@ -487,33 +506,33 @@ impl<'e> Parser<'e> {
         }
     }
 
-    fn parse_return(&mut self) -> Result<Statement, Error> {
+    fn parse_return(&mut self) -> Result<Statement<'s, (ParsedType<'s>, Span)>, Error> {
         let expr = self.parse_expr()?;
         self.expect_semicolon()?;
 
         Ok(Statement::Return(expr))
     }
 
-    fn parse_if(&mut self) -> Result<Statement, Error> {
+    fn parse_if(&mut self) -> Result<Statement<'s, (ParsedType<'s>, Span)>, Error> {
         let guard = self.parse_expr()?;
         let body = self.parse_block()?;
 
         Ok(Statement::If { guard, body })
     }
 
-    fn parse_while_loop(&mut self) -> Result<Statement, Error> {
+    fn parse_while_loop(&mut self) -> Result<Statement<'s, (ParsedType<'s>, Span)>, Error> {
         let guard = self.parse_expr()?;
         let body = self.parse_block()?;
 
         Ok(Statement::WhileLoop { guard, body })
     }
 
-    fn _parse_expr(&mut self) -> Result<Expression, Error> {
+    fn _parse_expr(&mut self) -> Result<Expression<'s, (ParsedType<'s>, Span)>, Error> {
         let lhs = self.parse_addsub()?;
         Ok(lhs)
     }
 
-    fn parse_addsub(&mut self) -> Result<Expression, Error> {
+    fn parse_addsub(&mut self) -> Result<Expression<'s, (ParsedType<'s>, Span)>, Error> {
         let lhs = self.parse_muldiv()?;
         match self.tokens.current() {
             Some((Token::Operator(op @ (Operator::Plus | Operator::Minus)), _)) => {
@@ -533,7 +552,7 @@ impl<'e> Parser<'e> {
         }
     }
 
-    fn parse_muldiv(&mut self) -> Result<Expression, Error> {
+    fn parse_muldiv(&mut self) -> Result<Expression<'s, (ParsedType<'s>, Span)>, Error> {
         let lhs = self.parse_term()?;
         match self.tokens.current() {
             Some((Token::Operator(op @ (Operator::Star | Operator::Slash)), _)) => {
@@ -553,12 +572,12 @@ impl<'e> Parser<'e> {
         }
     }
 
-    fn parse_term(&mut self) -> Result<Expression, Error> {
+    fn parse_term(&mut self) -> Result<Expression<'s, (ParsedType<'s>, Span)>, Error> {
         let (token, range) = self.expect_take_current()?;
         let span = self.span(range.clone());
         let expr = match token {
             Token::Number(num, explicit_type) => Expression {
-                inner: ExprInner::Const(num, explicit_type),
+                inner: ExprInner::Const(num, explicit_type.map(|typ| Primitive::from(typ))),
                 typ: None,
                 span,
             },
@@ -567,7 +586,7 @@ impl<'e> Parser<'e> {
                 self.expect_token(Token::RightParenthesis, "expected closing parenthesis")?;
                 expr
             }
-            Token::Ident(ident) => self.parse_ident_expr(ident, range)?,
+            Token::Ident(_) => self.parse_ident_expr(range.start)?,
             _ => {
                 return Err(self
                     .err_ctx
@@ -580,7 +599,7 @@ impl<'e> Parser<'e> {
         Ok(expr)
     }
 
-    fn parse_expr(&mut self) -> Result<Expression, Error> {
+    fn parse_expr(&mut self) -> Result<Expression<'s, (ParsedType<'s>, Span)>, Error> {
         let mut lhs = self.parse_single_expr()?;
 
         if let Some((Token::Operator(op), _)) = self.tokens.current() {
@@ -626,7 +645,12 @@ impl<'e> Parser<'e> {
         Ok(lhs)
     }
 
-    fn bind_expr(&mut self, op: Operator, lhs: Expression, rhs: Expression) -> ExprInner {
+    fn bind_expr(
+        &mut self,
+        op: Operator,
+        lhs: Expression<'s, (ParsedType<'s>, Span)>,
+        rhs: Expression<'s, (ParsedType<'s>, Span)>,
+    ) -> ExprInner<'s, (ParsedType<'s>, Span)> {
         match op {
             Operator::Plus => {
                 ExprInner::Arithmetic(Box::new(lhs), Box::new(rhs), ArithmeticOp::Add, None)
@@ -678,7 +702,7 @@ impl<'e> Parser<'e> {
         }
     }
 
-    fn parse_single_expr(&mut self) -> Result<Expression, Error> {
+    fn parse_single_expr(&mut self) -> Result<Expression<'s, (ParsedType<'s>, Span)>, Error> {
         let token = self.expect_take_current()?;
 
         // BUG: the largest possible 64-bit unsigned integer doesnt work.
@@ -748,10 +772,7 @@ impl<'e> Parser<'e> {
                         }
 
                         Expression {
-                            inner: ExprInner::Const(
-                                -(number as i64) as u64,
-                                Some(SemanticType::I64),
-                            ),
+                            inner: ExprInner::Const(-(number as i64) as u64, Some(Primitive::I64)),
                             typ: None,
                             span,
                         }
@@ -772,7 +793,7 @@ impl<'e> Parser<'e> {
                     span: self.span(range),
                 }
             }
-            (Token::Ident(ident), range) => self.parse_ident_expr(ident, range)?,
+            (Token::Ident(_), range) => self.parse_ident_expr(range.start)?,
             (Token::Character(c), range) => Expression {
                 inner: ExprInner::Character(c),
                 typ: None,
@@ -832,10 +853,9 @@ impl<'e> Parser<'e> {
 
     fn parse_ident_expr(
         &mut self,
-        mut ident: String,
-        range: Range<usize>,
-    ) -> Result<Expression, Error> {
-        self.parse_rest_of_path(&mut ident)?;
+        ident_start: usize,
+    ) -> Result<Expression<'s, (ParsedType<'s>, Span)>, Error> {
+        let ident = self.parse_rest_of_path(ident_start)?;
 
         if matches!(self.tokens.current(), Some((Token::LeftParenthesis, _))) {
             self.tokens.move_one();
@@ -847,7 +867,7 @@ impl<'e> Parser<'e> {
             Ok(Expression {
                 inner: ExprInner::FnCall(ident, args),
                 typ: None,
-                span: self.span((range.start)..(self.tokens.last_token_end())),
+                span: self.span((ident_start)..(self.tokens.last_token_end())),
             })
         } else if matches!(self.tokens.current(), Some((Token::LeftBracket, _))) {
             self.tokens.move_one();
@@ -859,36 +879,27 @@ impl<'e> Parser<'e> {
             Ok(Expression {
                 inner: ExprInner::Index(ident, Box::new(expr), None),
                 typ: None,
-                span: self.span((range.start)..(self.tokens.last_token_end())),
+                span: self.span((ident_start)..(self.tokens.last_token_end())),
             })
         } else {
             Ok(Expression {
                 inner: ExprInner::Variable(ident),
                 typ: None,
-                span: self.span((range.start)..(self.tokens.last_token_end())),
+                span: self.span((ident_start)..(self.tokens.last_token_end())),
             })
         }
     }
 
-    fn parse_rest_of_path(&mut self, ident: &mut String) -> Result<(), Error> {
+    fn parse_rest_of_path(&mut self, path_start: usize) -> Result<&'s str, Error> {
         while matches!(self.tokens.current(), Some((Token::PathSeparator, _))) {
             self.tokens.move_one();
-            let (token, range) = self.expect_take_current()?;
-            let Token::Ident(sub_ident) = token else {
-                return Err(self
-                    .err_ctx
-                    .unexpected_token(self.span(range), "expected identifier")
-                    .finish());
-            };
-
-            ident.push_str("::");
-            ident.push_str(&sub_ident);
+            self.expect_matches(|t| matches!(t, Token::Ident(_)), "expected identifier")?;
         }
 
-        Ok(())
+        Ok(&self.source[path_start..self.tokens.last_token_end()])
     }
 
-    fn parse_call_args(&mut self) -> Result<Vec<Expression>, Error> {
+    fn parse_call_args(&mut self) -> Result<Vec<Expression<'s, (ParsedType<'s>, Span)>>, Error> {
         let mut args = Vec::new();
         let mut first = true;
 
@@ -906,13 +917,13 @@ impl<'e> Parser<'e> {
         Ok(args)
     }
 
-    fn expect_token(&mut self, token: Token, message: impl ToString) -> Result<(), Error> {
+    fn expect_token(&mut self, token: Token<'s>, message: impl ToString) -> Result<(), Error> {
         self.expect_matches(|t| t == &token, message)
     }
 
     fn expect_matches<F>(&mut self, matches: F, message: impl ToString) -> Result<(), Error>
     where
-        F: FnOnce(&Token) -> bool,
+        F: FnOnce(&Token<'s>) -> bool,
     {
         let (token, range) = self.expect_take_current()?;
         if !matches(&token) {
@@ -944,7 +955,7 @@ impl<'e> Parser<'e> {
         Ok(())
     }
 
-    fn expect_take_current(&mut self) -> Result<(Token, Range<usize>), Error> {
+    fn expect_take_current(&mut self) -> Result<(Token<'s>, Range<usize>), Error> {
         let token = self.tokens.take_current();
         match token {
             Some(token) => Ok(token),

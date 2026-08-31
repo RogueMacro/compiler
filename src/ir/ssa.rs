@@ -25,7 +25,7 @@ pub fn verify_ssa(ir: &IR) -> Result<(), (String, HashSet<VirtualReg>)> {
         }
 
         if !duplicate_assignments.is_empty() {
-            return Err((name.clone(), duplicate_assignments));
+            return Err((name.clone().into_owned(), duplicate_assignments));
         }
     }
 

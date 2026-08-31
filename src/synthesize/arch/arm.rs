@@ -66,8 +66,14 @@ impl Assembler for ArmAssembler {
             } = item;
 
             let offset = assembler.instructions.len() as u64;
-            assembler.code.symbols.push((name.clone(), offset * 4));
-            assembler.functions.insert(name, offset as usize);
+            // TODO: name as reference instead of owned
+            assembler
+                .code
+                .symbols
+                .push((name.clone().into_owned(), offset * 4));
+            assembler
+                .functions
+                .insert(name.into_owned(), offset as usize);
 
             ProcedureGen::assemble(&mut assembler, stack, stack_size, &size_map, body);
         }
