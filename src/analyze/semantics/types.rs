@@ -248,7 +248,7 @@ impl Primitive {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Primitive> {
+    pub fn parse(s: &str) -> Option<Primitive> {
         Some(match s {
             "()" => Primitive::Unit,
             "i8" => Primitive::I8,
@@ -321,7 +321,7 @@ impl<'s> From<&'s str> for ParsedType<'s> {
             return ParsedType::Pointer(Box::new(typ));
         }
 
-        if let Some(primitive) = Primitive::from_str(string) {
+        if let Some(primitive) = Primitive::parse(string) {
             return ParsedType::Primitive(primitive);
         }
 
@@ -369,7 +369,7 @@ impl<'s, 'e> Resolver<'e> {
                 TypeId::from_parsed(&ParsedType::from(name)),
                 TypeInfo {
                     size,
-                    kind: TypeKind::Primitive(Primitive::from_str(name).unwrap()),
+                    kind: TypeKind::Primitive(Primitive::parse(name).unwrap()),
                 },
             )
         })
@@ -388,18 +388,10 @@ impl<'s, 'e> Resolver<'e> {
         mut self,
         mut ast_vec: Vec<AST<'s, (ParsedType<'s>, Span)>>,
     ) -> (AST<'s, TypeId>, TypeMap) {
-        for ast in ast_vec.iter_mut() {
-            let mangled_path = ast
-                .mangled_path
-                .as_ref()
-                .expect("AST was not mangled before type resolution");
-
-            for item in ast.items.iter_mut() {
-                if let Item::Struct { name, .. } = item {
-                    let typeid = TypeId::from_parsed(&ParsedType::Struct(name));
-                    println!("known typeid {} => {:?}", name, typeid);
-                    self.known_typeids.insert(typeid);
-                }
+        for item in ast_vec.iter_mut().flat_map(|ast| ast.items.iter_mut()) {
+            if let Item::Struct { name, .. } = item {
+                let typeid = TypeId::from_parsed(&ParsedType::Struct(name));
+                self.known_typeids.insert(typeid);
             }
         }
 
@@ -416,6 +408,17 @@ impl<'s, 'e> Resolver<'e> {
             } = ast;
 
             let mangled_path = mangled_path.unwrap();
+
+            for (import, span) in imports.iter() {
+                let typeid = TypeId::from_parsed(&ParsedType::Struct(import));
+                if !self.known_typeids.contains(&typeid) {
+                    self.err_ctx
+                        .error(span.clone())
+                        .with_message("unknown import")
+                        .with_label(span.clone(), "could not find type")
+                        .report();
+                }
+            }
 
             for item in items.into_iter() {
                 let item = match item {
@@ -493,8 +496,7 @@ impl<'s, 'e> Resolver<'e> {
             }
         }
 
-        let mut struct_fields: HashMap<TypeId, (String, Vec<(String, TypeId, u64)>)> =
-            HashMap::new();
+        let mut struct_fields = HashMap::new();
         for item in main_ast.items.iter() {
             if let Item::Struct { name, fields, .. } = item {
                 let typeid = TypeId::from_parsed(&ParsedType::Struct(name));
@@ -515,21 +517,13 @@ impl<'s, 'e> Resolver<'e> {
             struct_def_size(&mut self.types, typeid, &mut struct_fields);
         }
 
-        for (typeid, typeinfo) in self.types.map.iter() {
-            println!(
-                "sizeof({}) = {}",
-                self.types.display(*typeid),
-                typeinfo.size
-            );
-        }
-
         (main_ast, self.types)
     }
 
     fn function(
         &mut self,
         mangled_path: &str,
-        imports: &[&str],
+        imports: &[(&str, Span)],
         def: FnDef<'s, (ParsedType<'s>, Span)>,
     ) -> FnDef<'s, TypeId> {
         let FnDef {
@@ -567,7 +561,7 @@ impl<'s, 'e> Resolver<'e> {
     fn body(
         &mut self,
         mangled_path: &str,
-        imports: &[&str],
+        imports: &[(&str, Span)],
         body: Vec<Statement<'s, (ParsedType<'s>, Span)>>,
     ) -> Vec<Statement<'s, TypeId>> {
         body.into_iter()
@@ -578,7 +572,7 @@ impl<'s, 'e> Resolver<'e> {
     fn statement(
         &mut self,
         mangled_path: &str,
-        imports: &[&str],
+        imports: &[(&str, Span)],
         stmt: Statement<'s, (ParsedType<'s>, Span)>,
     ) -> Statement<'s, TypeId> {
         match stmt {
@@ -618,7 +612,7 @@ impl<'s, 'e> Resolver<'e> {
     fn var_assign(
         &mut self,
         mangled_path: &str,
-        imports: &[&str],
+        imports: &[(&str, Span)],
         var: Assignable<'s, (ParsedType<'s>, Span)>,
     ) -> Assignable<'s, TypeId> {
         match var {
@@ -639,7 +633,7 @@ impl<'s, 'e> Resolver<'e> {
     fn expression(
         &mut self,
         mangled_path: &str,
-        imports: &[&str],
+        imports: &[(&str, Span)],
         expr: Expression<'s, (ParsedType<'s>, Span)>,
     ) -> Expression<'s, TypeId> {
         let Expression { inner, typ, span } = expr;
@@ -719,7 +713,7 @@ impl<'s, 'e> Resolver<'e> {
     fn resolve_type(
         &mut self,
         mangled_path: &str,
-        imports: &[&str],
+        imports: &[(&str, Span)],
         typ: ParsedType<'s>,
         span: Span,
     ) -> TypeId {
@@ -730,9 +724,7 @@ impl<'s, 'e> Resolver<'e> {
                 self.types.ptr_type_to(value_typeid)
             }
             ParsedType::Struct(typename) => {
-                println!("\n- Resolve '{}'", typename);
                 let local_typepath = format!("{}::{}", mangled_path, typename);
-                println!("local: {}", local_typepath);
 
                 let local_typeid = TypeId::from_parsed(&ParsedType::Struct(&local_typepath));
                 if self.known_typeids.contains(&local_typeid) {
@@ -740,9 +732,18 @@ impl<'s, 'e> Resolver<'e> {
                 }
 
                 let absolute_typeid = TypeId::from_parsed(&ParsedType::Struct(typename));
-                println!("absolute: {}", typename);
                 if self.known_typeids.contains(&absolute_typeid) {
                     return absolute_typeid;
+                }
+
+                for (import, _) in imports {
+                    if matches!(import.rsplit_once("::"), Some((_, typ)) if typ == typename) {
+                        let import_typeid = TypeId::from_parsed(&ParsedType::Struct(import));
+
+                        assert!(self.known_typeids.contains(&import_typeid));
+
+                        return import_typeid;
+                    }
                 }
 
                 self.err_ctx
@@ -773,7 +774,7 @@ fn struct_def_size(
     for (_, field_type, field_offset) in fields.iter_mut() {
         let field_size = struct_def_size(types, *field_type, struct_fields);
 
-        let oversize = size % dbg!(field_size.clamp(1, 8));
+        let oversize = size % field_size.clamp(1, 8);
         if oversize > 0 {
             size += field_size.min(8) - oversize;
         }

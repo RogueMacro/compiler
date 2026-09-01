@@ -644,13 +644,6 @@ impl<'s> Analyzer<'s> {
 
             ExprInner::Cast(cast_from, cast_to) => {
                 if let Some(expr_type) = self.expression(cast_from, None) {
-                    // if expr_type.can_cast_to(cast_to) {
-                    println!(
-                        "cast: {} => {}",
-                        self.types.display(expr_type),
-                        self.types.display(*cast_to)
-                    );
-
                     let expr_type_is_ptr = self.types.get(expr_type).is_ptr();
                     let cast_to_is_ptr = self.types.get(*cast_to).is_ptr();
 

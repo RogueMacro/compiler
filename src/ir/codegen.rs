@@ -639,8 +639,6 @@ impl<'ir, 'a, 's> BlockBuilder<'ir, 'a, 's> {
             }
 
             ExprInner::MemberAccess(parent, member, typeid) => {
-                println!("member access: {:?}", parent);
-
                 let parent = self.flatten_expr(*parent, None);
                 let parent_vreg = self.src_to_vreg(parent);
 

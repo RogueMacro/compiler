@@ -84,7 +84,10 @@ impl<'e, 's> Parser<'e, 's> {
                 let import = self.parse_rest_of_path(path_start)?;
                 self.expect_semicolon()?;
 
-                self.ast.imports.push(import);
+                self.ast.imports.push((
+                    import,
+                    self.span(path_start..(self.tokens.last_token_end() - 1)),
+                ));
 
                 Ok(None)
             }

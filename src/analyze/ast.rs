@@ -14,7 +14,7 @@ pub mod parse;
 pub struct AST<'s, T> {
     pub package: Option<&'s str>,
     pub modules: Vec<(&'s str, Span)>,
-    pub imports: Vec<&'s str>,
+    pub imports: Vec<(&'s str, Span)>,
     pub mangled_path: Option<String>,
     pub items: Vec<Item<'s, T>>,
 }
