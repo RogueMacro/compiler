@@ -19,7 +19,7 @@ struct Formatter {
 
 impl Formatter {
     fn new() -> *Formatter {
-        formatter := [Formatter] { string: String::from("hello world") };
+        formatter: *Formatter = [Formatter] { string: String::from("hello world") };
 
         return formatter;
     }

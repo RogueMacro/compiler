@@ -476,12 +476,38 @@ impl<'e, 's> Parser<'e, 's> {
                             .finish());
                     };
 
-                    let rvalue = self.parse_expr()?;
+                    let rhs = self.parse_expr()?;
                     self.expect_semicolon()?;
+
                     Ok(Statement::Declare {
                         var,
-                        expr: rvalue,
+                        expr: rhs,
                         var_span: self.span(range),
+                        explicit_type: None,
+                    })
+                }
+                Some((Token::Colon, _)) => {
+                    let ExprInner::Variable(var) = expr.inner else {
+                        return Err(self
+                            .err_ctx
+                            .error(expr.span.clone())
+                            .with_message("invalid assignment")
+                            .with_label(expr.span, "only variables are allowed in assignments")
+                            .finish());
+                    };
+
+                    let explicit_type = Some(self.parse_type()?);
+
+                    self.expect_token(Token::Assign(None), "expected '='")?;
+
+                    let rhs = self.parse_expr()?;
+                    self.expect_semicolon()?;
+
+                    Ok(Statement::Declare {
+                        var,
+                        expr: rhs,
+                        var_span: self.span(range),
+                        explicit_type,
                     })
                 }
                 Some((_, range)) => Err(self

@@ -94,6 +94,7 @@ pub enum Statement<'s, T> {
         var: &'s str,
         expr: Expression<'s, T>,
         var_span: Span,
+        explicit_type: Option<T>,
     },
     Assign {
         var: Assignable<'s, T>,

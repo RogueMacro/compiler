@@ -306,12 +306,30 @@ impl<'s> Analyzer<'s> {
                 var,
                 expr,
                 var_span,
+                explicit_type,
             } => {
-                let var_type = self.expression(expr, None);
+                let expr_type = self.expression(expr, None);
+
+                if let Some(expr_type) = expr_type
+                    && let Some(explicit_type) = explicit_type
+                    && expr_type != *explicit_type
+                {
+                    let expr_msg = format!(
+                        "expected type {}, found type {}",
+                        self.types.display(*explicit_type),
+                        self.types.display(expr_type)
+                    );
+                    self.err_ctx
+                        .error(var_span.clone())
+                        .with_message("unexpected type")
+                        .with_label(expr.span.clone(), expr_msg)
+                        .with_note(var_span.clone(), "variable defined here")
+                        .report();
+                }
 
                 if self
                     .variables
-                    .insert(var.to_owned(), var_type.unwrap_or(TypeId::unit()))
+                    .insert(var.to_owned(), expr_type.unwrap_or(TypeId::unit()))
                     .is_some()
                 {
                     self.err_ctx

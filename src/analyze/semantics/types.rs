@@ -613,10 +613,13 @@ impl<'s, 'e> Resolver<'e> {
                 var,
                 expr,
                 var_span,
+                explicit_type,
             } => Statement::Declare {
                 var,
                 expr: self.expression(mangled_path, imports, expr),
                 var_span,
+                explicit_type: explicit_type
+                    .map(|(typ, span)| self.resolve_type(mangled_path, imports, typ, span)),
             },
             Statement::Assign {
                 var,
