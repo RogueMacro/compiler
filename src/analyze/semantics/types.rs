@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet},
     fmt,
     hash::{Hash, Hasher},
@@ -121,7 +122,7 @@ impl TypeInfo {
 pub enum TypeKind {
     Struct {
         qualifier: String,
-        fields: Vec<(String, TypeId, u64)>,
+        fields: Vec<(String, TypeId, u64, Span)>,
     },
     Pointer(TypeId),
     Primitive(Primitive),
@@ -179,7 +180,7 @@ impl TypeMap {
             ..
         }) = self.map.get(&typeid)
         {
-            for (field_name, _, offset) in fields.iter() {
+            for (field_name, _, offset, _) in fields.iter() {
                 if field_name == member {
                     return Some(*offset);
                 }
@@ -348,6 +349,7 @@ pub enum Sign {
 pub struct Resolver<'e> {
     types: TypeMap,
     known_typeids: HashSet<TypeId>,
+    known_functions: HashSet<u64>,
 
     err_ctx: &'e mut ErrorContext,
 }
@@ -380,6 +382,7 @@ impl<'s, 'e> Resolver<'e> {
         Self {
             types: TypeMap { map: types },
             known_typeids,
+            known_functions: HashSet::new(),
             err_ctx,
         }
     }
@@ -389,9 +392,28 @@ impl<'s, 'e> Resolver<'e> {
         mut ast_vec: Vec<AST<'s, (ParsedType<'s>, Span)>>,
     ) -> (AST<'s, TypeId>, TypeMap) {
         for item in ast_vec.iter_mut().flat_map(|ast| ast.items.iter_mut()) {
-            if let Item::Struct { name, .. } = item {
-                let typeid = TypeId::from_parsed(&ParsedType::Struct(name));
-                self.known_typeids.insert(typeid);
+            match item {
+                Item::Struct { name, .. } => {
+                    let typeid = TypeId::from_parsed(&ParsedType::Struct(name));
+                    self.known_typeids.insert(typeid);
+                }
+                Item::Function(FnDef { name, .. }) | Item::ForwardDecl { name, .. } => {
+                    let mut h = FxHasher::default();
+                    name.hash(&mut h);
+                    self.known_functions.insert(h.finish());
+                }
+                Item::Impl {
+                    struct_name,
+                    functions,
+                } => {
+                    for def in functions {
+                        let name = format!("{}::{}", struct_name, def.name);
+                        let mut h = FxHasher::default();
+                        name.hash(&mut h);
+                        self.known_functions.insert(h.finish());
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -411,13 +433,22 @@ impl<'s, 'e> Resolver<'e> {
 
             for (import, span) in imports.iter() {
                 let typeid = TypeId::from_parsed(&ParsedType::Struct(import));
-                if !self.known_typeids.contains(&typeid) {
-                    self.err_ctx
-                        .error(span.clone())
-                        .with_message("unknown import")
-                        .with_label(span.clone(), "could not find type")
-                        .report();
+                if self.known_typeids.contains(&typeid) {
+                    continue;
                 }
+
+                let mut h = FxHasher::default();
+                import.hash(&mut h);
+                let hash = h.finish();
+                if self.known_functions.contains(&hash) {
+                    continue;
+                }
+
+                self.err_ctx
+                    .error(span.clone())
+                    .with_message("unknown import")
+                    .with_label(span.clone(), "could not find item")
+                    .report();
             }
 
             for item in items.into_iter() {
@@ -506,7 +537,9 @@ impl<'s, 'e> Resolver<'e> {
                         name.clone().into_owned(),
                         fields
                             .iter()
-                            .map(|(name, typeid, _)| ((*name).to_owned(), *typeid, 0))
+                            .map(|(name, typeid, span)| {
+                                ((*name).to_owned(), *typeid, 0, span.clone())
+                            })
                             .collect(),
                     ),
                 );
@@ -686,7 +719,7 @@ impl<'s, 'e> Resolver<'e> {
                 type_id,
             ),
             ExprInner::FnCall(fn_name, exprs) => ExprInner::FnCall(
-                fn_name,
+                self.resolve_function(mangled_path, imports, fn_name, span.clone()),
                 exprs
                     .into_iter()
                     .map(|expr| self.expression(mangled_path, imports, expr))
@@ -708,6 +741,50 @@ impl<'s, 'e> Resolver<'e> {
         };
 
         Expression { inner, typ, span }
+    }
+
+    fn resolve_function(
+        &mut self,
+        mangled_path: &str,
+        imports: &[(&str, Span)],
+        path: Cow<'s, str>,
+        span: Span,
+    ) -> Cow<'s, str> {
+        let local_function = format!("{}::{}", mangled_path, path);
+        let mut h = FxHasher::default();
+        local_function.hash(&mut h);
+        let local_hash = h.finish();
+        if self.known_functions.contains(&local_hash) {
+            return Cow::Owned(local_function);
+        }
+
+        let mut h = FxHasher::default();
+        path.hash(&mut h);
+        let absolute_hash = h.finish();
+        if self.known_functions.contains(&absolute_hash) {
+            return path;
+        }
+
+        let root = path
+            .split_once("::")
+            .map(|(l, _)| l)
+            .unwrap_or(path.as_ref());
+
+        for (import, _) in imports {
+            if let Some((prepath, name)) = import.rsplit_once("::")
+                && name == root
+            {
+                return Cow::Owned(format!("{}::{}", prepath, path));
+            }
+        }
+
+        self.err_ctx
+            .error(span.clone())
+            .with_message("unknown function")
+            .with_label(span, "please find this...")
+            .report();
+
+        path
     }
 
     fn resolve_type(
@@ -762,7 +839,7 @@ impl<'s, 'e> Resolver<'e> {
 fn struct_def_size(
     types: &mut TypeMap,
     typeid: TypeId,
-    struct_fields: &mut HashMap<TypeId, (String, Vec<(String, TypeId, u64)>)>,
+    struct_fields: &mut HashMap<TypeId, (String, Vec<(String, TypeId, u64, Span)>)>,
 ) -> u64 {
     if let Some(type_info) = types.map.get(&typeid) {
         return type_info.size;
@@ -771,7 +848,7 @@ fn struct_def_size(
     let mut size = 0;
     let (qualifier, mut fields) = struct_fields.remove(&typeid).unwrap();
 
-    for (_, field_type, field_offset) in fields.iter_mut() {
+    for (_, field_type, field_offset, _) in fields.iter_mut() {
         let field_size = struct_def_size(types, *field_type, struct_fields);
 
         let oversize = size % field_size.clamp(1, 8);

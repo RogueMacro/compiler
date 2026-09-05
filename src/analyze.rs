@@ -60,6 +60,16 @@ impl<'c> ErrorBuilder<'c> {
         self
     }
 
+    pub fn with_note(mut self, span: Span, msg: impl ToString) -> Self {
+        let label = Label::new(span)
+            .with_color(ariadne::Color::BrightBlue)
+            .with_message(msg);
+
+        self.builder.add_label(label);
+
+        self
+    }
+
     pub fn report(self) {
         let error = Error::new(self.builder.finish());
         self.context.errors.push(error);

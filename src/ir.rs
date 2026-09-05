@@ -492,7 +492,7 @@ impl<'s> fmt::Display for IR<'s> {
                 write!(f, ", {}", reg)?;
             }
 
-            writeln!(f, ") size_map: {:?} {{", size_map)?;
+            writeln!(f, ") {{")?;
 
             for block in body {
                 let predecessors: Vec<_> = body

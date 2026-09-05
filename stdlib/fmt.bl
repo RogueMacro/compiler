@@ -14,12 +14,12 @@ fn printc(c: char) {
 }
 
 struct Formatter {
-    string: String,
+    string: *String,
 }
 
 impl Formatter {
     fn new() -> *Formatter {
-        formatter := [Formatter] { };
+        formatter := [Formatter] { string: String::from("hello world") };
 
         return formatter;
     }

@@ -170,7 +170,7 @@ pub enum ExprInner<'s, T> {
 
     MemberAccess(Box<Expression<'s, T>>, &'s str, Option<TypeId>),
 
-    FnCall(&'s str, Vec<Expression<'s, T>>),
+    FnCall(Cow<'s, str>, Vec<Expression<'s, T>>),
 
     Construct {
         typ: T,

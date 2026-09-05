@@ -9,6 +9,8 @@ use crate::{
     ir::ValSize,
 };
 
+use itertools::Itertools;
+
 pub mod types;
 
 pub struct ValidAST<'s>(pub AST<'s, TypeId>);
@@ -356,7 +358,7 @@ impl<'s> Analyzer<'s> {
                                     if let TypeKind::Struct { qualifier, fields } =
                                         &value_typeinfo.kind
                                     {
-                                        let field_type = fields.iter().find_map(|(n, t, _)| {
+                                        let field_type = fields.iter().find_map(|(n, t, _, _)| {
                                             if n == member { Some(t.clone()) } else { None }
                                         });
 
@@ -695,9 +697,9 @@ impl<'s> Analyzer<'s> {
                     Some((parent_typeid, TypeKind::Struct { qualifier, fields })) => {
                         let fieldtype = fields
                             .iter()
-                            .find(|(field_name, _, _)| field_name == member);
+                            .find(|(field_name, _, _, _)| field_name == member);
 
-                        if let Some((_, fieldtype, _)) = fieldtype {
+                        if let Some((_, fieldtype, _, _)) = fieldtype {
                             *typeid = Some(parent_typeid);
                             Some(*fieldtype)
                         } else {
@@ -733,7 +735,9 @@ impl<'s> Analyzer<'s> {
                     .filter_map(|e| self.expression(e, None).map(|t| (t, e.span.clone())))
                     .collect();
 
-                if let Some((fn_decl_span, ret_type, decl_args)) = self.functions.get(*function) {
+                if let Some((fn_decl_span, ret_type, decl_args)) =
+                    self.functions.get(function.as_ref())
+                {
                     if decl_args.len() != call_args.len() {
                         self.err_ctx
                             .error(expr.span.clone())
@@ -769,8 +773,8 @@ impl<'s> Analyzer<'s> {
                         }
                     }
 
-                    if !self.fn_call_context.contains(*function) {
-                        self.fn_call_context.insert(function.to_owned());
+                    if !self.fn_call_context.contains(function.as_ref()) {
+                        self.fn_call_context.insert(function.clone().into_owned());
                     }
 
                     Some(*ret_type)
@@ -785,7 +789,77 @@ impl<'s> Analyzer<'s> {
                 }
             }
 
-            ExprInner::Construct { typ, fields } => Some(self.types.ptr_type_to(*typ)),
+            ExprInner::Construct { typ, fields } => {
+                let typeinfo = self.types.get(*typ);
+                if let TypeKind::Struct {
+                    fields: type_fields,
+                    ..
+                } = &typeinfo.kind
+                {
+                    let type_fields = type_fields.clone();
+                    let mut missing_fields = Vec::new();
+
+                    for (type_field_name, type_field_type, _, field_def_span) in type_fields.iter()
+                    {
+                        if let Some((_, init_expr)) =
+                            fields.iter_mut().find(|(n, _)| *n == type_field_name)
+                        {
+                            if let Some(expr_typeid) =
+                                self.expression(init_expr, Some(*type_field_type))
+                                && expr_typeid != *type_field_type
+                            {
+                                let msg = format!(
+                                    "expected type {}",
+                                    self.types.display(*type_field_type)
+                                );
+                                self.err_ctx
+                                    .error(init_expr.span.clone())
+                                    .with_message("invalid expression type")
+                                    .with_label(init_expr.span.clone(), msg)
+                                    .with_note(field_def_span.clone(), "field type defined here")
+                                    .report();
+                            }
+                        } else {
+                            missing_fields.push(type_field_name);
+                        }
+                    }
+
+                    for (name, init_expr) in fields.iter() {
+                        if !type_fields.iter().any(|(tn, _, _, _)| tn == *name) {
+                            let msg = format!(
+                                "type {} does not have a field named {}",
+                                self.types.display(*typ),
+                                name
+                            );
+                            self.err_ctx
+                                .error(init_expr.span.clone())
+                                .with_message("unknown field")
+                                .with_label(init_expr.span.clone(), msg)
+                                .report();
+                        }
+                    }
+
+                    if !missing_fields.is_empty() {
+                        self.err_ctx
+                            .error(expr.span.clone())
+                            .with_message(format!(
+                                "missing field{} {}",
+                                if missing_fields.len() > 1 { "s" } else { "" },
+                                missing_fields.iter().join(", ")
+                            ))
+                            .with_label(expr.span.clone(), "add missing fields")
+                            .report();
+                    }
+                } else {
+                    self.err_ctx
+                        .error(expr.span.clone())
+                        .with_message("invalid construct type")
+                        .with_label(expr.span.clone(), "expected struct")
+                        .report();
+                }
+
+                Some(self.types.ptr_type_to(*typ))
+            }
 
             ExprInner::SizeOf(typ) => Some(TypeId::u64()),
         };

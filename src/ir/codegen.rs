@@ -17,6 +17,8 @@ use crate::{
     ir::{BasicBlock, Condition, IR, Item, Label, Op, SourceVal, Terminator, ValSize, VirtualReg},
 };
 
+const ALLOC_FN: &str = "std::alloc";
+
 impl<'s> IR<'s> {
     pub fn generate(ast: ValidAST<'s>, analyzer: &Analyzer<'s>) -> IR<'s> {
         let ast = ast.0;
@@ -677,7 +679,7 @@ impl<'ir, 'a, 's> BlockBuilder<'ir, 'a, 's> {
                 let dest = dest.or_else(|| type_size.map(|s| self.get_vreg(s)));
 
                 self.block_ops.push(Op::Call {
-                    function: function.to_owned(),
+                    function: function.into_owned(),
                     args,
                     dest,
                 });
@@ -686,7 +688,39 @@ impl<'ir, 'a, 's> BlockBuilder<'ir, 'a, 's> {
             }
 
             ExprInner::Construct { typ, fields } => {
-                todo!()
+                let size = self.analyzer.types.size_of(typ);
+
+                let size_vreg = self.get_vreg(ValSize::Doubleword);
+                let ptr_vreg = dest.unwrap_or_else(|| self.get_vreg(ValSize::Doubleword));
+
+                self.block_ops.push(Op::Assign {
+                    src: SourceVal::Immediate(size),
+                    dest: size_vreg,
+                });
+                self.block_ops.push(Op::Call {
+                    function: ALLOC_FN.to_owned(),
+                    args: vec![size_vreg],
+                    dest: Some(ptr_vreg),
+                });
+
+                for (field, expr) in fields {
+                    let offset = self.analyzer.types.offset_of_member(typ, field).unwrap();
+
+                    let field_size = self.analyzer.types.size_of(expr.typ.unwrap());
+                    let field_size = ValSize::from_bytes(field_size).unwrap();
+
+                    let src = self.flatten_expr(expr, None);
+                    let src = self.src_to_vreg(src);
+
+                    self.block_ops.push(Op::StorePointer {
+                        src,
+                        ptr: ptr_vreg,
+                        size: field_size,
+                        offset: offset as u32,
+                    });
+                }
+
+                SourceVal::VReg(ptr_vreg)
             }
 
             ExprInner::SizeOf(typ) => {

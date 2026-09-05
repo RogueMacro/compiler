@@ -102,6 +102,7 @@ impl<E: Executable, A: Assembler> Compiler<E, A> {
         match semantics::analyze(ast, typemap, &main_fn) {
             Ok((ast, analyzer)) => {
                 let ir = IR::generate(ast, &analyzer);
+                println!("{}", ir);
                 let code = A::assemble(ir, &main_fn);
                 Ok(code)
             }

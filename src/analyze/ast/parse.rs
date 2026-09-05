@@ -863,9 +863,31 @@ impl<'e, 's> Parser<'e, 's> {
         self.expect_token(Token::RightBracket, "expected closing bracket")?;
         self.expect_token(Token::LeftCurlyBracket, "expected opening brace")?;
 
-        let fields = Vec::new();
+        let mut fields = Vec::new();
+        let mut first = true;
+        while !matches!(self.tokens.current(), Some((Token::RightCurlyBracket, _))) {
+            if !first {
+                self.expect_token(Token::Comma, "expected comma")?;
+            }
 
-        self.expect_token(Token::RightCurlyBracket, "expected closeing brace")?;
+            let (token, range) = self.expect_take_current()?;
+            let Token::Ident(field) = token else {
+                let span = self.span(range);
+                return Err(self
+                    .err_ctx
+                    .unexpected_token(span, "expected field name")
+                    .finish());
+            };
+
+            self.expect_token(Token::Colon, "expected colon")?;
+
+            let init_expr = self.parse_expr()?;
+            fields.push((field, init_expr));
+
+            first = false;
+        }
+
+        self.expect_token(Token::RightCurlyBracket, "expected closing brace")?;
 
         Ok(Expression {
             inner: ExprInner::Construct { typ, fields },
@@ -888,7 +910,7 @@ impl<'e, 's> Parser<'e, 's> {
             self.expect_token(Token::RightParenthesis, "expected closing parenthesis")?;
 
             Ok(Expression {
-                inner: ExprInner::FnCall(ident, args),
+                inner: ExprInner::FnCall(Cow::Borrowed(ident), args),
                 typ: None,
                 span: self.span((ident_start)..(self.tokens.last_token_end())),
             })
