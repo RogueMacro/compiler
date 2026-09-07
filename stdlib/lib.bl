@@ -103,3 +103,50 @@ impl String {
     return string;
   }
 }
+
+fn max(a: u64, b: u64) -> u64 {
+    if a > b {
+        return a;
+    }
+    
+    return b;
+}
+
+struct PackedVec {
+    data: *i64,
+    length: u64,
+    capacity: u64
+}
+
+impl Vector {
+    fn new() -> *Vector {
+        return [Vector] { data: 0 as *i64, length: 0, capacity: 0 };
+    }
+
+    fn push_i64(self: *Vector, item: i64) {
+        if self.length == self.capacity {
+            old := self.data;
+            self.capacity = max(self.capacity * 2, 10u64);
+            self.data = std::alloc(self.capacity * sizeof(i64)) as *i64;
+            if (old as i64) != 0 {
+                copy(old as *i8, self.data as *i8, self.length * sizeof(i64));
+            }
+        }
+
+        std::fmt::print(String::from("vector push "));
+        std::fmt::print(String::from(itos(item)));
+        std::fmt::print(String::from(" at index "));
+        std::fmt::print(String::from(itos(self.length as i64)));
+        std::fmt::printc('\n');
+
+        self.data[self.length] = item;
+        self.length += 1;
+    }
+}
+
+fn copy(src: *i8, dest: *i8, len: u64) {
+    i := 0u64;
+    while i < len {
+        dest[i] = src[i];
+    }
+}

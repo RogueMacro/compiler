@@ -152,6 +152,8 @@ impl<'s> Analyzer<'s> {
 
         let mut used_functions: HashSet<String> = HashSet::new();
         used_functions.insert(self.main_fn.clone());
+        used_functions.insert("std::alloc".to_owned());
+
         let mut queue: Vec<&str> = vec![&self.main_fn];
 
         while let Some(&func) = queue.first() {
@@ -356,11 +358,15 @@ impl<'s> Analyzer<'s> {
 
                         typ
                     }
-                    Assignable::Index(array, index, size) => {
-                        let item_type = self.check_index(array, index, var_span);
+                    Assignable::Index {
+                        data,
+                        index,
+                        val_size,
+                    } => {
+                        let item_type = self.check_index(data, index, var_span);
 
                         if let Some(item_type) = item_type {
-                            *size =
+                            *val_size =
                                 Some(ValSize::from_bytes(self.types.size_of(item_type)).unwrap());
                         }
 
@@ -436,7 +442,7 @@ impl<'s> Analyzer<'s> {
                     self.err_ctx
                         .error(combine_span(var_span, &expr.span))
                         .with_message("mismatched types")
-                        .with_label(var_span.clone(), decl_msg)
+                        .with_note(var_span.clone(), decl_msg)
                         .with_label(expr.span.clone(), assign_msg)
                         .report();
                 }
@@ -693,11 +699,15 @@ impl<'s> Analyzer<'s> {
                 Some(*cast_to)
             }
 
-            ExprInner::Index(array, index_expr, size) => {
-                let item_type = self.check_index(array, index_expr, &expr.span);
+            ExprInner::Index {
+                data,
+                index,
+                val_size,
+            } => {
+                let item_type = self.check_index(data, index, &expr.span);
 
                 if let Some(item_type) = item_type.as_ref() {
-                    *size = Some(ValSize::from_bytes(self.types.size_of(*item_type)).unwrap());
+                    *val_size = Some(ValSize::from_bytes(self.types.size_of(*item_type)).unwrap());
                 }
 
                 item_type
@@ -768,7 +778,7 @@ impl<'s> Analyzer<'s> {
                                     call_args.len()
                                 ),
                             )
-                            .with_label(fn_decl_span.clone(), "function defined here")
+                            .with_note(fn_decl_span.clone(), "function defined here")
                             .report();
                     }
 
@@ -786,7 +796,7 @@ impl<'s> Analyzer<'s> {
                                 .error(call_span.clone())
                                 .with_message("incompatible types")
                                 .with_label(call_span.clone(), call_msg)
-                                .with_label(decl_span.clone(), decl_msg)
+                                .with_note(decl_span.clone(), decl_msg)
                                 .report();
                         }
                     }
@@ -888,16 +898,18 @@ impl<'s> Analyzer<'s> {
 
     fn check_index(
         &mut self,
-        array: &str,
+        array: &mut Expression<'s, TypeId>,
         index_expr: &mut Expression<'s, TypeId>,
         span: &Span,
     ) -> Option<TypeId> {
+        let var_type = self.expression(array, None)?;
+
         if let Some(expr_type) = self.expression(index_expr, Some(TypeId::u64()))
             && expr_type != TypeId::u64()
         {
             let message = format!(
-                "cannot index {} with value of type {}",
-                array,
+                "cannot index type {} with value of type {}",
+                self.types.display(var_type),
                 self.types.display(expr_type)
             );
             self.err_ctx
@@ -906,8 +918,6 @@ impl<'s> Analyzer<'s> {
                 .with_label(index_expr.span.clone(), "expected u64")
                 .report();
         }
-
-        let var_type = self.check_var(array, span)?;
 
         let var_type_info = self.types.get(var_type);
         if let TypeKind::Pointer(deref_type) = var_type_info.kind {

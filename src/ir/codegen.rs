@@ -297,27 +297,53 @@ impl<'ir, 'a, 's> BlockBuilder<'ir, 'a, 's> {
                                 offset: 0,
                             });
                         }
-                        Assignable::Index(array, index_expr, item_size) => {
-                            let index = self.flatten_expr(*index_expr, None);
+                        Assignable::Index {
+                            data,
+                            index,
+                            val_size,
+                        } => {
+                            let index = self.flatten_expr(*index, None);
                             let index_vreg = self.src_to_vreg(index);
 
-                            let array_vreg = self.get_vreg(ValSize::Doubleword);
-                            self.load_var(&array, array_vreg);
+                            // let array_vreg = self.get_vreg(ValSize::Doubleword);
+                            // self.load_var(&data, array_vreg);
+                            let array = self.flatten_expr(*data, None);
+                            let array_vreg = self.src_to_vreg(array);
 
                             let ptr = self.get_vreg(ValSize::Doubleword);
 
                             let src = self.src_to_vreg(src);
 
+                            let val_size = val_size.unwrap();
+
+                            let size_vreg =
+                                self.src_to_vreg(SourceVal::Immediate(val_size.to_bytes()));
+
+                            println!(
+                                "store index {} [{} * sizeof({})]",
+                                array_vreg,
+                                index_vreg,
+                                val_size.to_bytes()
+                            );
+
+                            let final_index_vreg = self.get_vreg(val_size);
+
+                            self.block_ops.push(Op::Multiply {
+                                a: index_vreg,
+                                b: size_vreg,
+                                dest: final_index_vreg,
+                            });
+
                             self.block_ops.push(Op::Add {
                                 a: array_vreg,
-                                b: index_vreg,
+                                b: final_index_vreg,
                                 dest: ptr,
                             });
 
                             self.block_ops.push(Op::StorePointer {
                                 src,
                                 ptr,
-                                size: item_size.unwrap(),
+                                size: val_size,
                                 offset: 0,
                             });
                         }
@@ -614,26 +640,49 @@ impl<'ir, 'a, 's> BlockBuilder<'ir, 'a, 's> {
 
             ExprInner::Cast(expr, _typ) => self.flatten_expr(*expr, dest),
 
-            ExprInner::Index(var, expr, item_size) => {
-                let index = self.flatten_expr(*expr, None);
+            ExprInner::Index {
+                data,
+                index,
+                val_size,
+            } => {
+                let index = self.flatten_expr(*index, None);
                 let index_vreg = self.src_to_vreg(index);
 
-                let array_vreg = self.get_vreg(ValSize::Doubleword);
-                self.load_var(&var, array_vreg);
+                let array = self.flatten_expr(*data, None);
+                let array_vreg = self.src_to_vreg(array);
 
                 let ptr = self.get_vreg(ValSize::Doubleword);
 
                 let dest = dest.unwrap_or_else(|| self.get_vreg(type_size.unwrap()));
 
+                let val_size = val_size.unwrap();
+
+                let size_vreg = self.src_to_vreg(SourceVal::Immediate(val_size.to_bytes()));
+
+                println!(
+                    "store index {} [{} * sizeof({})]",
+                    array_vreg,
+                    index_vreg,
+                    val_size.to_bytes()
+                );
+
+                let final_index_vreg = self.get_vreg(val_size);
+
+                self.block_ops.push(Op::Multiply {
+                    a: index_vreg,
+                    b: size_vreg,
+                    dest: final_index_vreg,
+                });
+
                 self.block_ops.push(Op::Add {
                     a: array_vreg,
-                    b: index_vreg,
+                    b: final_index_vreg,
                     dest: ptr,
                 });
 
                 self.block_ops.push(Op::LoadPointer {
                     ptr,
-                    size: item_size.unwrap(),
+                    size: val_size,
                     dest,
                 });
 

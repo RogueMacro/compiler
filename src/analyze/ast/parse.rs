@@ -49,19 +49,28 @@ impl<'e, 's> Parser<'e, 's> {
         Ok(ast)
     }
 
-    fn find_semicolon(&mut self) -> Result<bool, Error> {
-        while let Some((token, _)) = self.tokens.take_current() {
-            if matches!(token, Token::Semicolon) {
-                return Ok(true);
-            }
-        }
-
-        Ok(false)
-    }
-
     fn parse_item(&mut self) -> Result<Option<Item<'s, (ParsedType<'s>, Span)>>, Error> {
         let (token, range) = self.expect_take_current()?;
         let Token::Keyword(keyword) = token else {
+            while !matches!(
+                self.tokens.current(),
+                Some((
+                    Token::Keyword(
+                        Keyword::Function
+                            | Keyword::Extern
+                            | Keyword::Memory
+                            | Keyword::Struct
+                            | Keyword::Impl
+                            | Keyword::Use
+                            | Keyword::Package
+                            | Keyword::Module
+                    ),
+                    _
+                ))
+            ) {
+                self.expect_take_current()?;
+            }
+
             return Err(self
                 .err_ctx
                 .unexpected_token(self.span(range), "expected keyword")
@@ -381,22 +390,30 @@ impl<'e, 's> Parser<'e, 's> {
         self.expect_token(Token::LeftCurlyBracket, "expected block")?;
 
         let mut statements = Vec::new();
-        while let Some((token, _)) = self.tokens.current() {
+        'stmt_loop: while let Some((token, _)) = self.tokens.current() {
             if matches!(token, Token::RightCurlyBracket) {
                 self.tokens.take_current();
-                return Ok(statements);
+                break;
             }
 
             match self.parse_statement() {
                 Ok(stmt) => statements.push(stmt),
                 Err(err) => {
                     self.err_ctx.report(err);
-                    self.find_semicolon()?;
+
+                    'find_loop: loop {
+                        let (token, _) = self.expect_take_current()?;
+                        match token {
+                            Token::Semicolon => break 'find_loop,
+                            Token::RightCurlyBracket => break 'stmt_loop,
+                            _ => {}
+                        }
+                    }
                 }
             }
         }
 
-        Err(self.err_ctx.unexpected_eof(self.span_eof()).finish())
+        Ok(statements)
     }
 
     fn parse_statement(&mut self) -> Result<Statement<'s, (ParsedType<'s>, Span)>, Error> {
@@ -407,6 +424,7 @@ impl<'e, 's> Parser<'e, 's> {
             self.parse_keyword(keyword, range.clone())
         } else {
             let expr = self.parse_expr()?;
+            let var_span = self.span(range.start..self.tokens.last_token_end());
 
             match self.tokens.take_current() {
                 Some((Token::Semicolon, _)) => Ok(Statement::Expr(expr)),
@@ -414,9 +432,15 @@ impl<'e, 's> Parser<'e, 's> {
                     let var = match expr.inner.clone() {
                         ExprInner::Variable(var) => Assignable::Var(var),
                         ExprInner::Deref(var, None) => Assignable::Ptr(var, None),
-                        ExprInner::Index(array, index, size) => {
-                            Assignable::Index(array, index, size)
-                        }
+                        ExprInner::Index {
+                            data,
+                            index,
+                            val_size,
+                        } => Assignable::Index {
+                            data,
+                            index,
+                            val_size,
+                        },
                         ExprInner::MemberAccess(parent, member, _typename) => {
                             Assignable::MemberAccess(parent, member)
                         }
@@ -463,7 +487,7 @@ impl<'e, 's> Parser<'e, 's> {
                     Ok(Statement::Assign {
                         var,
                         expr: rvalue,
-                        var_span: self.span(range),
+                        var_span,
                     })
                 }
                 Some((Token::Declare, _)) => {
@@ -543,10 +567,19 @@ impl<'e, 's> Parser<'e, 's> {
     }
 
     fn parse_if(&mut self) -> Result<Statement<'s, (ParsedType<'s>, Span)>, Error> {
-        let guard = self.parse_expr()?;
+        let guard = self.parse_expr();
+        if guard.is_err() {
+            while !matches!(self.tokens.current(), Some((Token::LeftCurlyBracket, _))) {
+                self.tokens.move_one();
+            }
+        }
+
         let body = self.parse_block()?;
 
-        Ok(Statement::If { guard, body })
+        Ok(Statement::If {
+            guard: guard?,
+            body,
+        })
     }
 
     fn parse_while_loop(&mut self) -> Result<Statement<'s, (ParsedType<'s>, Span)>, Error> {
@@ -633,10 +666,27 @@ impl<'e, 's> Parser<'e, 's> {
 
         if let Some((Token::Operator(op), _)) = self.tokens.current() {
             let mut op = *op;
+            self.tokens.move_one();
+
+            // if op == Operator::Dot {
+            //     let (token, range) = self.expect_take_current()?;
+            //     let Token::Ident(member) = token else {
+            //         let span = self.span(range);
+            //         return Err(self
+            //             .err_ctx
+            //             .unexpected_token(span, "expected struct member")
+            //             .finish());
+            //     };
+            //
+            //     let span = self.span(lhs.span.1.start..range.end);
+            //     return Ok(Expression {
+            //         inner: ExprInner::MemberAccess(Box::new(lhs), member, None),
+            //         typ: None,
+            //         span,
+            //     });
+            // }
 
             let left_bind_power = op.precedence();
-
-            self.tokens.take_current();
 
             let right_side = match self.tokens.peek() {
                 Some((Token::Operator(next_op), _)) => Some((next_op.precedence(), *next_op)),
@@ -647,10 +697,11 @@ impl<'e, 's> Parser<'e, 's> {
                 && right_bind_power < left_bind_power
             {
                 let rhs = self.parse_single_expr()?;
+                let span = self.span(lhs.span.1.start..rhs.span.1.end);
                 lhs = Expression {
                     inner: self.bind_expr(op, lhs, rhs),
                     typ: None,
-                    span: self.span(0..1),
+                    span,
                 };
 
                 self.tokens.move_one();
@@ -662,10 +713,10 @@ impl<'e, 's> Parser<'e, 's> {
             };
 
             let span = self.span((lhs.span.1.start)..(rhs.span.1.end));
-            let expr_type = self.bind_expr(op, lhs, rhs);
+            let inner = self.bind_expr(op, lhs, rhs);
 
             return Ok(Expression {
-                inner: expr_type,
+                inner,
                 typ: None,
                 span,
             });
@@ -721,13 +772,12 @@ impl<'e, 's> Parser<'e, 's> {
             Operator::Or => ExprInner::Logical(Box::new(lhs), Box::new(rhs), LogicalOp::Or),
 
             Operator::Not => unreachable!(),
-
-            Operator::Dot => {
-                let ExprInner::Variable(member) = rhs.inner else {
-                    panic!("rhs: {:?}", rhs);
-                };
-                ExprInner::MemberAccess(Box::new(lhs), member, None)
-            }
+            // Operator::Dot => {
+            //     let ExprInner::Variable(member) = rhs.inner else {
+            //         panic!("rhs: {:?}", rhs);
+            //     };
+            //     ExprInner::MemberAccess(Box::new(lhs), member, None)
+            // }
         }
     }
 
@@ -863,22 +913,93 @@ impl<'e, 's> Parser<'e, 's> {
             }
         };
 
-        if let Some((Token::Keyword(Keyword::As), _)) = self.tokens.current() {
-            self.tokens.move_one();
-            let typ = self.parse_type()?;
+        self.parse_single_expr_ext(expr)
+    }
 
-            let start = expr.span.1.start;
-            let end = self.tokens.last_token_end();
-            let span = self.span(start..end);
+    fn parse_single_expr_ext(
+        &mut self,
+        expr: Expression<'s, (ParsedType<'s>, Span)>,
+    ) -> Result<Expression<'s, (ParsedType<'s>, Span)>, Error> {
+        let combined = match self.tokens.current() {
+            Some((Token::Keyword(Keyword::As), _)) => {
+                self.tokens.move_one();
 
-            return Ok(Expression {
-                inner: ExprInner::Cast(Box::new(expr), typ),
-                typ: None,
-                span,
-            });
-        }
+                let typ = self.parse_type()?;
 
-        Ok(expr)
+                let start = expr.span.1.start;
+                let end = self.tokens.last_token_end();
+                let span = self.span(start..end);
+
+                Expression {
+                    inner: ExprInner::Cast(Box::new(expr), typ),
+                    typ: None,
+                    span,
+                }
+            }
+            Some((Token::LeftParenthesis, _)) => {
+                self.tokens.move_one();
+
+                let args = self.parse_call_args()?;
+
+                self.expect_token(Token::RightParenthesis, "expected closing parenthesis")?;
+
+                let span = self.span((expr.span.1.start)..(self.tokens.last_token_end()));
+
+                let ExprInner::Variable(ident) = expr.inner else {
+                    panic!()
+                };
+
+                Expression {
+                    inner: ExprInner::FnCall(Cow::Borrowed(ident), args),
+                    typ: None,
+                    span,
+                }
+            }
+            Some((Token::LeftBracket, _)) => {
+                self.tokens.move_one();
+
+                let index = self.parse_expr()?;
+
+                self.expect_token(Token::RightBracket, "expected closing bracket")?;
+
+                let span = self.span((expr.span.1.start)..(self.tokens.last_token_end()));
+
+                Expression {
+                    inner: ExprInner::Index {
+                        data: Box::new(expr),
+                        index: Box::new(index),
+                        val_size: None,
+                    },
+                    typ: None,
+                    span,
+                }
+            }
+            Some((Token::Dot, _)) => {
+                self.tokens.move_one();
+
+                let (token, range) = self.expect_take_current()?;
+                let Token::Ident(member) = token else {
+                    let span = self.span(range);
+                    return Err(self
+                        .err_ctx
+                        .unexpected_token(span, "expected member name")
+                        .finish());
+                };
+
+                let span = self.span(expr.span.1.start..self.tokens.last_token_end());
+
+                Expression {
+                    inner: ExprInner::MemberAccess(Box::new(expr), member, None),
+                    typ: None,
+                    span,
+                }
+            }
+            _ => {
+                return Ok(expr);
+            }
+        };
+
+        self.parse_single_expr_ext(combined)
     }
 
     fn parse_construct(&mut self) -> Result<Expression<'s, (ParsedType<'s>, Span)>, Error> {
@@ -928,37 +1049,37 @@ impl<'e, 's> Parser<'e, 's> {
     ) -> Result<Expression<'s, (ParsedType<'s>, Span)>, Error> {
         let ident = self.parse_rest_of_path(ident_start)?;
 
-        if matches!(self.tokens.current(), Some((Token::LeftParenthesis, _))) {
-            self.tokens.move_one();
-
-            let args = self.parse_call_args()?;
-
-            self.expect_token(Token::RightParenthesis, "expected closing parenthesis")?;
-
-            Ok(Expression {
-                inner: ExprInner::FnCall(Cow::Borrowed(ident), args),
-                typ: None,
-                span: self.span((ident_start)..(self.tokens.last_token_end())),
-            })
-        } else if matches!(self.tokens.current(), Some((Token::LeftBracket, _))) {
-            self.tokens.move_one();
-
-            let expr = self.parse_expr()?;
-
-            self.expect_token(Token::RightBracket, "expected closing bracket")?;
-
-            Ok(Expression {
-                inner: ExprInner::Index(ident, Box::new(expr), None),
-                typ: None,
-                span: self.span((ident_start)..(self.tokens.last_token_end())),
-            })
-        } else {
-            Ok(Expression {
-                inner: ExprInner::Variable(ident),
-                typ: None,
-                span: self.span((ident_start)..(self.tokens.last_token_end())),
-            })
-        }
+        // if matches!(self.tokens.current(), Some((Token::LeftParenthesis, _))) {
+        //     self.tokens.move_one();
+        //
+        //     let args = self.parse_call_args()?;
+        //
+        //     self.expect_token(Token::RightParenthesis, "expected closing parenthesis")?;
+        //
+        //     Ok(Expression {
+        //         inner: ExprInner::FnCall(Cow::Borrowed(ident), args),
+        //         typ: None,
+        //         span: self.span((ident_start)..(self.tokens.last_token_end())),
+        //     })
+        // } else if matches!(self.tokens.current(), Some((Token::LeftBracket, _))) {
+        //     self.tokens.move_one();
+        //
+        //     let expr = self.parse_expr()?;
+        //
+        //     self.expect_token(Token::RightBracket, "expected closing bracket")?;
+        //
+        //     Ok(Expression {
+        //         inner: ExprInner::Index(ident, Box::new(expr), None),
+        //         typ: None,
+        //         span: self.span((ident_start)..(self.tokens.last_token_end())),
+        //     })
+        // } else {
+        Ok(Expression {
+            inner: ExprInner::Variable(ident),
+            typ: None,
+            span: self.span((ident_start)..(self.tokens.last_token_end())),
+        })
+        // }
     }
 
     fn parse_rest_of_path(&mut self, path_start: usize) -> Result<&'s str, Error> {
@@ -1027,10 +1148,10 @@ impl<'e, 's> Parser<'e, 's> {
     }
 
     fn expect_take_current(&mut self) -> Result<(Token<'s>, Range<usize>), Error> {
-        let token = self.tokens.take_current();
-        match token {
-            Some(token) => Ok(token),
-            None => Err(self.err_ctx.unexpected_eof(self.span_eof()).finish()),
+        if self.tokens.current().is_some() {
+            self.tokens.take_current().map(Ok).unwrap()
+        } else {
+            Err(self.err_ctx.unexpected_eof(self.span_eof()).finish())
         }
     }
 
@@ -1039,7 +1160,7 @@ impl<'e, 's> Parser<'e, 's> {
     }
 
     fn span_eof(&self) -> (Rc<PathBuf>, Range<usize>) {
-        let end = self.tokens.cur_token_start();
+        let end = self.tokens.last_token_end();
         self.span((end - 1)..end)
     }
 }

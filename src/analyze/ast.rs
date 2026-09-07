@@ -117,19 +117,23 @@ pub enum Statement<'s, T> {
 pub enum Assignable<'s, T> {
     Var(&'s str),
     Ptr(&'s str, Option<ValSize>),
-    Index(&'s str, Box<Expression<'s, T>>, Option<ValSize>),
+    Index {
+        data: Box<Expression<'s, T>>,
+        index: Box<Expression<'s, T>>,
+        val_size: Option<ValSize>,
+    },
     MemberAccess(Box<Expression<'s, T>>, &'s str),
 }
 
 impl<'s, T> Assignable<'s, T> {
-    pub fn symbol(&self) -> &'s str {
-        match self {
-            Self::Var(var)
-            | Self::Ptr(var, _)
-            | Self::Index(var, _, _)
-            | Self::MemberAccess(_, var) => var,
-        }
-    }
+    // pub fn symbol(&self) -> &'s str {
+    //     match self {
+    //         Self::Var(var)
+    //         | Self::Ptr(var, _)
+    //         | Self::Index{var, _, _)
+    //         | Self::MemberAccess(_, var) => var,
+    //     }
+    // }
 }
 
 #[derive(Clone)]
@@ -167,7 +171,12 @@ pub enum ExprInner<'s, T> {
     Negate(Box<Expression<'s, T>>),
 
     Cast(Box<Expression<'s, T>>, T),
-    Index(&'s str, Box<Expression<'s, T>>, Option<ValSize>),
+
+    Index {
+        data: Box<Expression<'s, T>>,
+        index: Box<Expression<'s, T>>,
+        val_size: Option<ValSize>,
+    },
 
     MemberAccess(Box<Expression<'s, T>>, &'s str, Option<TypeId>),
 

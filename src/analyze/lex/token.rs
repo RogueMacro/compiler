@@ -27,6 +27,7 @@ pub enum Token<'s> {
     Assign(Option<Operator>),
     Arrow,
     PathSeparator,
+    Dot,
 
     Operator(Operator),
 }
@@ -55,6 +56,8 @@ impl<'s> Token<'s> {
 
             ('&', _) => (Self::Reference, false),
 
+            ('.', _) => (Self::Dot, false),
+
             _ => return None,
         };
 
@@ -81,8 +84,6 @@ pub enum Operator {
 
     And,
     Or,
-
-    Dot,
 }
 
 impl Operator {
@@ -107,8 +108,6 @@ impl Operator {
 
             ('!', _) => (Self::Not, false),
 
-            ('.', _) => (Self::Dot, false),
-
             _ => return None,
         };
 
@@ -125,7 +124,6 @@ impl Operator {
             Plus | Minus => 3,
             Star | Slash | Modulo => 4,
             Not => 5,
-            Dot => 6,
         }
     }
 

@@ -654,11 +654,15 @@ impl<'s, 'e> Resolver<'e> {
         match var {
             Assignable::Var(name) => Assignable::Var(name),
             Assignable::Ptr(name, val_size) => Assignable::Ptr(name, val_size),
-            Assignable::Index(name, expr, val_size) => Assignable::Index(
-                name,
-                Box::new(self.expression(mangled_path, imports, *expr)),
+            Assignable::Index {
+                data,
+                index,
                 val_size,
-            ),
+            } => Assignable::Index {
+                data: Box::new(self.expression(mangled_path, imports, *data)),
+                index: Box::new(self.expression(mangled_path, imports, *index)),
+                val_size,
+            },
             Assignable::MemberAccess(expr, member) => Assignable::MemberAccess(
                 Box::new(self.expression(mangled_path, imports, *expr)),
                 member,
@@ -711,11 +715,15 @@ impl<'s, 'e> Resolver<'e> {
                 Box::new(self.expression(mangled_path, imports, *expr)),
                 self.resolve_type(mangled_path, imports, typ, span),
             ),
-            ExprInner::Index(var, expr, val_size) => ExprInner::Index(
-                var,
-                Box::new(self.expression(mangled_path, imports, *expr)),
+            ExprInner::Index {
+                data,
+                index,
                 val_size,
-            ),
+            } => ExprInner::Index {
+                data: Box::new(self.expression(mangled_path, imports, *data)),
+                index: Box::new(self.expression(mangled_path, imports, *index)),
+                val_size,
+            },
             ExprInner::MemberAccess(expr, member, type_id) => ExprInner::MemberAccess(
                 Box::new(self.expression(mangled_path, imports, *expr)),
                 member,
