@@ -3,8 +3,8 @@ use std::{borrow::Cow, ops::Range, path::PathBuf, rc::Rc};
 use crate::analyze::{
     Error, ErrorCode, ErrorContext, Span,
     ast::{
-        AST, ArithmeticOp, Assignable, CompareOp, ExprInner, Expression, FnDef, Item, LogicalOp,
-        ParsedType, Statement,
+        AST, ArithmeticOp, Assignable, CompareOp, ExprInner, Expression, FnDef, FnPtr, Item,
+        LogicalOp, ParsedType, Statement,
     },
     lex::{
         Tokens,
@@ -430,7 +430,7 @@ impl<'e, 's> Parser<'e, 's> {
                 Some((Token::Semicolon, _)) => Ok(Statement::Expr(expr)),
                 Some((Token::Assign(op), assign_range)) => {
                     let var = match expr.inner.clone() {
-                        ExprInner::Variable(var) => Assignable::Var(var),
+                        ExprInner::Ident(var) => Assignable::Var(var),
                         ExprInner::Deref(var, None) => Assignable::Ptr(var, None),
                         ExprInner::Index {
                             data,
@@ -491,7 +491,7 @@ impl<'e, 's> Parser<'e, 's> {
                     })
                 }
                 Some((Token::Declare, _)) => {
-                    let ExprInner::Variable(var) = expr.inner else {
+                    let ExprInner::Ident(var) = expr.inner else {
                         return Err(self
                             .err_ctx
                             .error(expr.span.clone())
@@ -511,7 +511,7 @@ impl<'e, 's> Parser<'e, 's> {
                     })
                 }
                 Some((Token::Colon, _)) => {
-                    let ExprInner::Variable(var) = expr.inner else {
+                    let ExprInner::Ident(var) = expr.inner else {
                         return Err(self
                             .err_ctx
                             .error(expr.span.clone())
@@ -945,12 +945,17 @@ impl<'e, 's> Parser<'e, 's> {
 
                 let span = self.span((expr.span.1.start)..(self.tokens.last_token_end()));
 
-                let ExprInner::Variable(ident) = expr.inner else {
-                    panic!()
-                };
+                // let ExprInner::Variable(ident) = expr.inner else {
+                //     return Err(self
+                //         .err_ctx
+                //         .error(expr.span.clone())
+                //         .with_message("invalid function call")
+                //         .with_label(expr.span, "expected function name")
+                //         .finish());
+                // };
 
                 Expression {
-                    inner: ExprInner::FnCall(Cow::Borrowed(ident), args),
+                    inner: ExprInner::FnCall(FnPtr::Expr(Box::new(expr)), args),
                     typ: None,
                     span,
                 }
@@ -1075,7 +1080,7 @@ impl<'e, 's> Parser<'e, 's> {
         //     })
         // } else {
         Ok(Expression {
-            inner: ExprInner::Variable(ident),
+            inner: ExprInner::Ident(ident),
             typ: None,
             span: self.span((ident_start)..(self.tokens.last_token_end())),
         })

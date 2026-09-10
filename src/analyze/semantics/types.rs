@@ -10,7 +10,7 @@ use rustc_hash::FxHasher;
 
 use crate::analyze::{
     ErrorContext, Span,
-    ast::{AST, Assignable, ExprInner, Expression, FnDef, Item, Statement},
+    ast::{AST, Assignable, ExprInner, Expression, FnDef, FnPtr, Item, Statement},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -685,7 +685,7 @@ impl<'s, 'e> Resolver<'e> {
             ExprInner::Character(ch) => ExprInner::Character(ch),
             ExprInner::String(string) => ExprInner::String(string),
             ExprInner::Bool(boo) => ExprInner::Bool(boo),
-            ExprInner::Variable(var) => ExprInner::Variable(var),
+            ExprInner::Ident(var) => ExprInner::Ident(var),
             ExprInner::Pointer(var) => ExprInner::Pointer(var),
             ExprInner::Deref(var, _) => ExprInner::Deref(var, None),
             ExprInner::Arithmetic(lhs, rhs, arithmetic_op, sign) => ExprInner::Arithmetic(
@@ -758,44 +758,85 @@ impl<'s, 'e> Resolver<'e> {
         &mut self,
         mangled_path: &str,
         imports: &[(&str, Span)],
-        path: Cow<'s, str>,
+        fnptr: FnPtr<'s, (ParsedType<'s>, Span)>,
         span: Span,
-    ) -> Cow<'s, str> {
-        let local_function = format!("{}::{}", mangled_path, path);
-        let mut h = FxHasher::default();
-        local_function.hash(&mut h);
-        let local_hash = h.finish();
-        if self.known_functions.contains(&local_hash) {
-            return Cow::Owned(local_function);
-        }
+    ) -> FnPtr<'s, TypeId> {
+        match fnptr {
+            FnPtr::Named(path) => {
+                panic!()
+            }
+            FnPtr::Expr(expr) => {
+                let expr = self.expression(mangled_path, imports, *expr);
 
-        let mut h = FxHasher::default();
-        path.hash(&mut h);
-        let absolute_hash = h.finish();
-        if self.known_functions.contains(&absolute_hash) {
-            return path;
-        }
+                match expr {
+                    // Expression {
+                    //     inner: ExprInner::MemberAccess(parent, member, member_type),
+                    //     typ,
+                    //     span,
+                    // } => {
+                    //     let parent = self.expression(mangled_path, imports, parent);
+                    //     if let Some(parent_type) = parent.typ {
+                    //         let typeinfo = self.types.get(parent_type);
+                    //     }
+                    // }
+                    Expression {
+                        inner: ExprInner::Ident(path),
+                        typ: _,
+                        span,
+                    } => {
+                        let local_function = format!("{}::{}", mangled_path, path);
+                        let mut h = FxHasher::default();
+                        local_function.hash(&mut h);
+                        let local_hash = h.finish();
+                        if self.known_functions.contains(&local_hash) {
+                            return FnPtr::Named(Cow::Owned(local_function));
+                        }
 
-        let root = path
-            .split_once("::")
-            .map(|(l, _)| l)
-            .unwrap_or(path.as_ref());
+                        let mut h = FxHasher::default();
+                        path.hash(&mut h);
+                        let absolute_hash = h.finish();
+                        if self.known_functions.contains(&absolute_hash) {
+                            return FnPtr::Named(Cow::Borrowed(path));
+                        }
 
-        for (import, _) in imports {
-            if let Some((prepath, name)) = import.rsplit_once("::")
-                && name == root
-            {
-                return Cow::Owned(format!("{}::{}", prepath, path));
+                        let root = path
+                            .split_once("::")
+                            .map(|(l, _)| l)
+                            .unwrap_or(path.as_ref());
+
+                        for (import, _) in imports {
+                            if let Some((prepath, name)) = import.rsplit_once("::")
+                                && name == root
+                            {
+                                return FnPtr::Named(Cow::Owned(format!("{}::{}", prepath, path)));
+                            }
+                        }
+
+                        self.err_ctx
+                            .error(span.clone())
+                            .with_message("unknown function")
+                            .with_label(span, "please find this...")
+                            .report();
+
+                        FnPtr::Named(Cow::Borrowed(path))
+                    }
+                    _ => {
+                        // self.err_ctx
+                        //     .error(expr.span.clone())
+                        //     .with_message("unable to locate function")
+                        //     .with_label(
+                        //         expr.span.clone(),
+                        //         "cannot find function related to this expression",
+                        //     )
+                        //     .report();
+
+                        println!("{:?}", expr);
+
+                        FnPtr::Expr(Box::new(expr))
+                    }
+                }
             }
         }
-
-        self.err_ctx
-            .error(span.clone())
-            .with_message("unknown function")
-            .with_label(span, "please find this...")
-            .report();
-
-        path
     }
 
     fn resolve_type(

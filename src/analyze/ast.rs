@@ -150,7 +150,7 @@ pub enum ExprInner<'s, T> {
     String(String),
     Bool(bool),
 
-    Variable(&'s str),
+    Ident(&'s str),
     Pointer(&'s str),
     Deref(&'s str, Option<TypeId>),
 
@@ -180,7 +180,7 @@ pub enum ExprInner<'s, T> {
 
     MemberAccess(Box<Expression<'s, T>>, &'s str, Option<TypeId>),
 
-    FnCall(Cow<'s, str>, Vec<Expression<'s, T>>),
+    FnCall(FnPtr<'s, T>, Vec<Expression<'s, T>>),
 
     Construct {
         typ: T,
@@ -188,6 +188,12 @@ pub enum ExprInner<'s, T> {
     },
 
     SizeOf(T),
+}
+
+#[derive(Debug, Clone)]
+pub enum FnPtr<'s, T> {
+    Named(Cow<'s, str>),
+    Expr(Box<Expression<'s, T>>),
 }
 
 #[derive(Debug, Clone, Copy)]

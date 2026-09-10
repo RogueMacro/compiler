@@ -1,9 +1,12 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+};
 
 use crate::{
     analyze::{
         ErrorContext, ErrorVec, Span,
-        ast::{AST, Assignable, ExprInner, Expression, FnDef, Item, Statement},
+        ast::{AST, Assignable, ExprInner, Expression, FnDef, FnPtr, Item, Statement},
         semantics::types::{ParsedType, Sign, TypeId, TypeKind, TypeMap},
     },
     ir::ValSize,
@@ -509,7 +512,7 @@ impl<'s> Analyzer<'s> {
             ExprInner::String(_) => Some(TypeId::char_ptr()),
             ExprInner::Bool(_) => Some(TypeId::bool()),
 
-            ExprInner::Variable(var) => self.check_var(var, &expr.span),
+            ExprInner::Ident(var) => self.check_var(var, &expr.span),
             ExprInner::Pointer(var) => self
                 .check_var(var, &expr.span)
                 .map(|typeid| self.types.ptr_type_to(typeid)),
@@ -758,61 +761,114 @@ impl<'s> Analyzer<'s> {
             }
 
             ExprInner::FnCall(function, call_args) => {
+                let fn_name = match function {
+                    FnPtr::Named(function) => Some(function.clone()),
+                    FnPtr::Expr(expr) => {
+                        if let Expression {
+                            inner: ExprInner::MemberAccess(parent, member, _),
+                            typ,
+                            span,
+                        } = expr.as_mut()
+                            && let Some(parent_type) = self.expression(parent, None)
+                        {
+                            let typeinfo = self.types.get(parent_type);
+                            if let TypeKind::Pointer(inner_type) = &typeinfo.kind {
+                                call_args.insert(0, parent.as_ref().clone());
+
+                                Some(Cow::Owned(format!(
+                                    "{}::{}",
+                                    self.types.display(*inner_type),
+                                    member
+                                )))
+                            } else {
+                                self.err_ctx
+                                    .error(span.clone())
+                                    .with_message("invalid method type")
+                                    .with_label(span.clone(), "expected pointer to struct")
+                                    .report();
+
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    }
+                    _ => {
+                        self.err_ctx
+                            .error(expr.span.clone())
+                            .with_message("invalid function call")
+                            .with_label(
+                                expr.span.clone(),
+                                "expected function name or associated method",
+                            )
+                            .report();
+
+                        None
+                    }
+                };
+
                 let call_types: Vec<(TypeId, Span)> = call_args
                     .iter_mut()
                     .filter_map(|e| self.expression(e, None).map(|t| (t, e.span.clone())))
                     .collect();
 
-                if let Some((fn_decl_span, ret_type, decl_args)) =
-                    self.functions.get(function.as_ref())
-                {
-                    if decl_args.len() != call_args.len() {
-                        self.err_ctx
-                            .error(expr.span.clone())
-                            .with_message("invalid argument count")
-                            .with_label(
-                                expr.span.clone(),
-                                format!(
-                                    "expected {} arguments, got {}",
-                                    decl_args.len(),
-                                    call_args.len()
-                                ),
-                            )
-                            .with_note(fn_decl_span.clone(), "function defined here")
-                            .report();
-                    }
-
-                    for ((call_type, call_span), (decl_span, decl_type)) in
-                        call_types.iter().zip(decl_args)
+                if let Some(fn_name) = fn_name {
+                    let typeid = if let Some((fn_decl_span, ret_type, decl_args)) =
+                        self.functions.get(fn_name.as_ref())
                     {
-                        if call_type != decl_type {
-                            let call_msg =
-                                format!("this is of type {}", self.types.display(*call_type));
-                            let decl_msg = format!(
-                                "function accepts argument of type {}",
-                                self.types.display(*decl_type)
-                            );
+                        if decl_args.len() != call_args.len() {
                             self.err_ctx
-                                .error(call_span.clone())
-                                .with_message("incompatible types")
-                                .with_label(call_span.clone(), call_msg)
-                                .with_note(decl_span.clone(), decl_msg)
+                                .error(expr.span.clone())
+                                .with_message("invalid argument count")
+                                .with_label(
+                                    expr.span.clone(),
+                                    format!(
+                                        "expected {} arguments, got {}",
+                                        decl_args.len(),
+                                        call_args.len()
+                                    ),
+                                )
+                                .with_note(fn_decl_span.clone(), "function defined here")
                                 .report();
                         }
-                    }
 
-                    if !self.fn_call_context.contains(function.as_ref()) {
-                        self.fn_call_context.insert(function.clone().into_owned());
-                    }
+                        for ((call_type, call_span), (decl_span, decl_type)) in
+                            call_types.iter().zip(decl_args)
+                        {
+                            if call_type != decl_type {
+                                let call_msg =
+                                    format!("this is of type {}", self.types.display(*call_type));
+                                let decl_msg = format!(
+                                    "function accepts argument of type {}",
+                                    self.types.display(*decl_type)
+                                );
+                                self.err_ctx
+                                    .error(call_span.clone())
+                                    .with_message("incompatible types")
+                                    .with_label(call_span.clone(), call_msg)
+                                    .with_note(decl_span.clone(), decl_msg)
+                                    .report();
+                            }
+                        }
 
-                    Some(*ret_type)
+                        if !self.fn_call_context.contains(fn_name.as_ref()) {
+                            self.fn_call_context.insert(fn_name.clone().into_owned());
+                        }
+
+                        Some(*ret_type)
+                    } else {
+                        self.err_ctx
+                            .error(expr.span.clone())
+                            .with_message("invalid function call")
+                            .with_label(expr.span.clone(), format!("{} is not a function", fn_name))
+                            .report();
+
+                        None
+                    };
+
+                    *function = FnPtr::Named(fn_name);
+                    typeid
                 } else {
-                    self.err_ctx
-                        .error(expr.span.clone())
-                        .with_message("invalid function call")
-                        .with_label(expr.span.clone(), format!("{} is not a function", function))
-                        .report();
-
                     None
                 }
             }

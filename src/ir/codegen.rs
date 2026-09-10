@@ -6,8 +6,8 @@ use std::{
 use crate::{
     analyze::{
         ast::{
-            ArithmeticOp, Assignable, ExprInner, Expression, FnDef, Item as AstItem, LogicalOp,
-            Statement,
+            ArithmeticOp, Assignable, ExprInner, Expression, FnDef, FnPtr, Item as AstItem,
+            LogicalOp, Statement,
         },
         semantics::{
             Analyzer, ValidAST,
@@ -485,7 +485,7 @@ impl<'ir, 'a, 's> BlockBuilder<'ir, 'a, 's> {
             }
             ExprInner::Bool(b) => SourceVal::Immediate(b as u64),
 
-            ExprInner::Variable(var) => {
+            ExprInner::Ident(var) => {
                 let dest = self.get_vreg(type_size.unwrap());
 
                 self.load_var(&var, dest);
@@ -726,6 +726,10 @@ impl<'ir, 'a, 's> BlockBuilder<'ir, 'a, 's> {
                     .collect();
 
                 let dest = dest.or_else(|| type_size.map(|s| self.get_vreg(s)));
+
+                let FnPtr::Named(function) = function else {
+                    panic!()
+                };
 
                 self.block_ops.push(Op::Call {
                     function: function.into_owned(),
